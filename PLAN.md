@@ -1,6 +1,6 @@
 # Claude Mindmap
 
-一个为 Claude Code 提供"会话脑图"能力的本地工具：定时读取历史会话，用 AI 自动分类工作项目与进展，最终通过 `/脑图` 命令在终端以 shell 风格树状图呈现。
+一个为 Claude Code 提供"会话脑图"能力的本地工具：定时读取历史会话，用 AI 自动分类工作项目与进展，最终通过 `/mindmap` 命令在终端以 shell 风格树状图呈现。
 
 ## 背景与动机
 
@@ -16,7 +16,7 @@ Claude Code 会话记录以 jsonl 形式存在本地 (`~/.claude/projects/<encod
 2. **AI 分类总结**：调用 `claude -p` (headless 模式) 让 Claude 自己对会话做分类与进展摘要
 3. **后台定时运行**：通过 launchd 定时触发，无需用户手动调用
 4. **终端渲染**：shell 风格树状图（Unicode box-drawing + ANSI 颜色）
-5. **快速查看**：`/脑图` slash command 直接读取缓存结果，秒开
+5. **快速查看**：`/mindmap` slash command 直接读取缓存结果，秒开
 
 ## 架构
 
@@ -32,7 +32,7 @@ Claude Code 会话记录以 jsonl 形式存在本地 (`~/.claude/projects/<encod
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────┐
-│  ~/.claude/commands/脑图.md (slash command)              │
+│  ~/.claude/commands/mindmap.md (slash command)           │
 │    └─> 调用 bin/render.py cache/mindmap.json            │
 │          └─> 用 rich.tree.Tree 渲染到终端                │
 └─────────────────────────────────────────────────────────┘
@@ -60,7 +60,7 @@ claude-mindmap/
 ├── launchd/
 │   └── com.bby.claude-mindmap.plist   # launchd 定时任务模板
 └── commands/
-    └── 脑图.md              # slash command 模板 (软链到 ~/.claude/commands/)
+    └── mindmap.md          # slash command 模板 (软链到 ~/.claude/commands/)
 ```
 
 ## 数据流
@@ -113,13 +113,13 @@ claude-mindmap/
 
 ## Slash Command
 
-`~/.claude/commands/脑图.md`：
+`~/.claude/commands/mindmap.md`：
 
 ```markdown
 ---
-description: 显示工作项目脑图
+description: Show work mindmap of recent Claude Code sessions
 ---
-运行 `python ~/code/claude-mindmap/bin/render.py` 并把输出原样展示给我。
+Run `python ~/code/claude-mindmap/bin/render.py` and show the output verbatim.
 ```
 
 ## 定时任务 (launchd)
