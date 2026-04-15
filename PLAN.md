@@ -176,7 +176,18 @@ LaunchAgent(用户级,`~/Library/LaunchAgents/com.bby.claude-mindmap.plist`),每
 - [x] M3:`render.py` ANSI 树形渲染
 - [x] M4:launchd plist + slash command + install.sh
 - [x] M5:`archived` 状态 + Claude Code hook(Stop / SessionStart) + install-hook.sh
-- [ ] M6:README、长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
+- [x] M6:`/mindmap-refresh` 命令、`bin/mindmap` 零模型 wrapper、README
+- [ ] M7:长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
+
+## 触发命令的设计取舍
+
+Claude Code 没有公开"注册 `/`-prefix handler 命令不走模型"的接口 —— 内置 `/usage`、`/help` 是 CLI 源码硬编码。用户扩展(markdown command / skill / subagent)本质都是 prompt 模板,必走模型;`hook` 只能事件驱动;`!` 前缀可直通 shell 但无 `/` 自动补全。
+
+**因此采用双路径并存**:
+- **零模型路径**:`bin/mindmap` 可执行 wrapper(软链到 `~/.local/bin/mindmap`),shell 里 `mindmap` 或 Claude Code 里 `!mindmap` 直接调用 `render.py`,零 token、零延迟、无补全。
+- **`/`-补全路径**:`/mindmap` / `/mindmap-refresh` 保留原 markdown command,优势是 `/` 自动补全和界面一致性,代价是每次一小轮模型 round-trip(prompt 已最小化为"原样输出注入的 shell 结果")。
+
+让用户按场景自选,不强制二选一。
 
 ## jsonl 结构探针发现
 

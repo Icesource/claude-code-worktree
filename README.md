@@ -90,15 +90,41 @@ After step 3 you can type `/mindmap` in any Claude Code session.
 
 ## Usage
 
-Inside Claude Code:
+There are two ways to view the mindmap, pick whichever fits the moment:
 
-- **`/mindmap`** — show the current cached mindmap. Fast (reads a local JSON).
-- **`/mindmap-refresh`** — force a re-classification, then show the result.
-  Use this right after install, or when you've closed Claude Code for a
-  while and want the very latest view before the hooks have had a chance
-  to catch up.
+### Zero-model path (fast, recommended)
 
-From a plain shell:
+`install.sh` symlinks a `mindmap` wrapper into `~/.local/bin`, so you can run:
+
+```bash
+mindmap              # render cached mindmap
+mindmap --refresh    # force refresh first, then render
+```
+
+Inside Claude Code, use the `!` shell-passthrough prefix to get the same
+zero-model behavior:
+
+```
+!mindmap
+!mindmap --refresh
+```
+
+This bypasses the model entirely — output is instant, no tokens used.
+The downside is `!`-commands don't tab-complete.
+
+### Slash-command path (tab-completes, goes through model)
+
+Claude Code does not currently support user-registered handler commands that
+bypass the model (see `PLAN.md` for details). The markdown slash commands
+below tab-complete on `/`, but each invocation makes a tiny model round-trip
+to echo the rendered tree.
+
+- **`/mindmap`** — show the current cached mindmap
+- **`/mindmap-refresh`** — force refresh first, then show the result. Use
+  right after install, or after a long break before hooks/launchd have
+  caught up.
+
+### Plain shell (for debugging)
 
 ```bash
 bash ~/code/claude-mindmap/bin/refresh.sh    # regenerate cache (blocking)
@@ -123,12 +149,13 @@ The classifier assigns each project one of four statuses:
 ```
 claude-mindmap/
 ├── bin/
+│   ├── mindmap            # user-facing wrapper (symlinked to ~/.local/bin)
 │   ├── extract.py         # incremental JSONL parser
 │   ├── aggregate.py       # build compact classifier input
 │   ├── refresh.sh         # orchestrate extract → claude -p → mindmap.json
 │   ├── refresh-bg.sh      # fire-and-forget wrapper + mkdir lock
 │   ├── render.py          # zero-dep ANSI tree renderer
-│   ├── install.sh         # slash commands + LaunchAgent
+│   ├── install.sh         # slash commands + shell wrapper + LaunchAgent
 │   └── install-hook.sh    # merges hooks into ~/.claude/settings.json
 ├── prompts/
 │   └── classify.md        # prompt given to claude -p

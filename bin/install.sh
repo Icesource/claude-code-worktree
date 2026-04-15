@@ -17,7 +17,20 @@ for cmd in mindmap mindmap-refresh; do
   echo "[install] linked slash command: $link -> $REPO_ROOT/commands/$cmd.md"
 done
 
-# 2. launchd job
+# 2. Shell wrapper (for `mindmap` / `!mindmap` — zero-model path)
+LOCAL_BIN="$HOME_DIR/.local/bin"
+mkdir -p "$LOCAL_BIN"
+BIN_LINK="$LOCAL_BIN/mindmap"
+if [ -L "$BIN_LINK" ] || [ -f "$BIN_LINK" ]; then
+  rm "$BIN_LINK"
+fi
+ln -s "$REPO_ROOT/bin/mindmap" "$BIN_LINK"
+echo "[install] linked shell wrapper: $BIN_LINK -> $REPO_ROOT/bin/mindmap"
+if ! echo ":$PATH:" | grep -q ":$LOCAL_BIN:"; then
+  echo "[install] WARNING: $LOCAL_BIN is not in \$PATH; add it to your shell rc to use 'mindmap' / '!mindmap'"
+fi
+
+# 3. launchd job
 LAUNCHAGENTS_DIR="$HOME_DIR/Library/LaunchAgents"
 mkdir -p "$LAUNCHAGENTS_DIR"
 PLIST_DST="$LAUNCHAGENTS_DIR/com.bby.claude-mindmap.plist"
@@ -33,7 +46,12 @@ echo "[install] loaded launchd job com.bby.claude-mindmap (fallback every 2h)"
 
 echo
 echo "Done. Next steps:"
-echo "  - Run once now:   bash $REPO_ROOT/bin/refresh.sh"
-echo "  - View mindmap:   /mindmap  (in Claude Code)"
-echo "  - Tail logs:      tail -f ~/Library/Logs/claude-mindmap.log"
-echo "  - Uninstall:      launchctl unload $PLIST_DST && rm $PLIST_DST $COMMANDS_DIR/mindmap.md $COMMANDS_DIR/mindmap-refresh.md"
+echo "  - Run once now:       bash $REPO_ROOT/bin/refresh.sh"
+echo "  - View (zero model):  mindmap           # in a shell"
+echo "                        !mindmap          # inside Claude Code"
+echo "  - View (via /cmd):    /mindmap          # inside Claude Code (tab-completes)"
+echo "  - Force refresh:      mindmap --refresh / /mindmap-refresh"
+echo "  - Tail logs:          tail -f ~/Library/Logs/claude-mindmap.log"
+echo "  - Uninstall:          launchctl unload $PLIST_DST && rm $PLIST_DST \\"
+echo "                          $COMMANDS_DIR/mindmap.md $COMMANDS_DIR/mindmap-refresh.md \\"
+echo "                          $BIN_LINK"
