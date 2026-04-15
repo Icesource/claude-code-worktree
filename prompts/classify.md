@@ -20,7 +20,18 @@ Your job:
 2. For each project produce:
    - `name`: short human-readable name (prefer the repo/folder name)
    - `cwd`: primary working directory (or a list if merged)
-   - `status`: one of `active`, `paused`, `done` — infer from recency and recap
+   - `status`: one of `active`, `paused`, `done`, `archived`. Rules:
+     * `active` — last activity within the past 3 days, work clearly ongoing
+     * `paused` — last activity 3–14 days ago, or longer but with a clear
+       "resume later" signal (open todos, unfinished MRs, waiting on someone)
+     * `done` — explicitly finished: shipped, merged, report delivered, or
+       recap/prompt indicates completion
+     * `archived` — last activity >14 days ago AND no clear resumption signal.
+       Also use this for one-off exploratory sessions, failed experiments,
+       throwaway debugging, or anything unlikely to have ongoing value.
+     When in doubt between `paused` and `archived`, check whether the work
+     produced durable artifacts (merged code, filed issues) — if yes,
+     `paused`; if no, `archived`.
    - `summary`: 1-2 sentences describing what the project is about
    - `progress`: 1-2 sentences on the latest state / where things stand
    - `tasks`: up to 6 concrete items with `{title, done}`. Prefer items
@@ -30,7 +41,10 @@ Your job:
 
 3. Sort projects by `last_activity_at` descending.
 
-4. Output **strict JSON only** matching this shape, no prose, no code fences:
+4. Sort `archived` projects to the end of the list, regardless of their
+   timestamp. Within each status group, sort by `last_activity_at` desc.
+
+5. Output **strict JSON only** matching this shape, no prose, no code fences:
 
 ```
 {
@@ -39,7 +53,7 @@ Your job:
     {
       "name": "...",
       "cwd": "...",
-      "status": "active|paused|done",
+      "status": "active|paused|done|archived",
       "summary": "...",
       "progress": "...",
       "tasks": [{"title": "...", "done": true|false}],

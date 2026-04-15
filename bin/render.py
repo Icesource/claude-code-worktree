@@ -39,6 +39,7 @@ STATUS_STYLE = {
     "active": ("●", GREEN),
     "paused": ("◐", YELLOW),
     "done": ("✓", DIM),
+    "archived": ("▪", DIM),
 }
 
 
@@ -103,8 +104,11 @@ def render(data: dict) -> str:
 
     term_width = max(60, min(100, os.get_terminal_size((100, 20)).columns)) if sys.stdout.isatty() else 100
 
-    for pi, proj in enumerate(projects):
-        last = pi == len(projects) - 1
+    live = [p for p in projects if p.get("status") != "archived"]
+    archived = [p for p in projects if p.get("status") == "archived"]
+
+    for pi, proj in enumerate(live):
+        last = pi == len(live) - 1 and not archived
         branch = "└── " if last else "├── "
         pipe = "    " if last else "│   "
 
@@ -152,6 +156,18 @@ def render(data: dict) -> str:
 
         if not last:
             out.append("│")
+
+    if archived:
+        out.append("│")
+        out.append(f"└── {c(DIM, f'archived ({len(archived)})')}")
+        for ai, proj in enumerate(archived):
+            alast = ai == len(archived) - 1
+            abranch = "    └─ " if alast else "    ├─ "
+            name = proj.get("name", "unnamed")
+            age = humanize_age(proj.get("last_activity_at"))
+            sess_n = len(proj.get("sessions", []))
+            line = f"{abranch}{name}  ({age}, {sess_n}s)"
+            out.append(c(DIM, line))
 
     return "\n".join(out)
 

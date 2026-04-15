@@ -8,11 +8,11 @@
     <key>ProgramArguments</key>
     <array>
         <string>/bin/bash</string>
-        <string>__REPO__/bin/refresh.sh</string>
+        <string>__REPO__/bin/refresh-bg.sh</string>
     </array>
 
     <key>StartInterval</key>
-    <integer>3600</integer>
+    <integer>7200</integer>
 
     <key>RunAtLoad</key>
     <false/>

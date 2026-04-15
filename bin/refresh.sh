@@ -30,9 +30,13 @@ if [ "$n_sessions" -eq 0 ]; then
 fi
 
 # Build the full prompt: instructions + input data.
+NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 FULL_PROMPT_FILE="$CACHE_DIR/_prompt.txt"
 {
   cat "$PROMPT_FILE"
+  echo
+  echo "CURRENT_TIME: $NOW_ISO"
+  echo "(Use this as the reference point when computing session age.)"
   echo
   echo "INPUT SESSIONS:"
   cat "$INPUT_FILE"

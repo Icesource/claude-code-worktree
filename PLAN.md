@@ -22,21 +22,45 @@ Claude Code 会话记录以 jsonl 形式存在本地 (`~/.claude/projects/<encod
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  launchd (每小时触发)                                    │
-│    └─> bin/refresh.sh                                   │
-│          ├─> 读取 ~/.claude/projects/**/*.jsonl          │
-│          ├─> 压缩/抽取关键信息 (prompt, cwd, 时间)        │
-│          ├─> claude -p "分类并总结这些会话..." < input    │
-│          └─> 输出 cache/mindmap.json                    │
+│  触发源(三选一或组合,见下节"触发策略")                 │
+│    · Claude Code Stop hook       (每轮响应结束)          │
+│    · Claude Code SessionStart hook (打开会话时)          │
+│    · launchd LaunchAgent         (每 2h 兜底)            │
+│           │                                              │
+│           ▼                                              │
+│    bin/refresh-bg.sh  (fire-and-forget + mkdir 锁)      │
+│           └─> bin/refresh.sh                             │
+│                 ├─> bin/extract.py  (增量读 jsonl)       │
+│                 ├─> bin/aggregate.py (构建 AI 输入)      │
+│                 ├─> claude -p < prompt                   │
+│                 └─> cache/mindmap.json                   │
 └─────────────────────────────────────────────────────────┘
                             │
                             ▼
 ┌─────────────────────────────────────────────────────────┐
 │  ~/.claude/commands/mindmap.md (slash command)           │
-│    └─> 调用 bin/render.py cache/mindmap.json            │
-│          └─> 用 rich.tree.Tree 渲染到终端                │
+│    └─> bin/render.py cache/mindmap.json                 │
+│          └─> ANSI 树形渲染到终端(零依赖)                │
 └─────────────────────────────────────────────────────────┘
 ```
+
+## 触发策略
+
+定时 vs 事件驱动的权衡:
+
+| 方案 | 优点 | 缺点 |
+|------|------|------|
+| launchd 每小时 | 与 Claude Code 无关,稳定 | 没用的时候也跑,不够新鲜 |
+| `Stop` hook | 每轮响应后立即刷新,最新鲜 | 未开 Claude Code 时完全不触发 |
+| `SessionStart` hook | 打开就刷新 | 首次刷新要等 AI 跑完 |
+
+**采用组合:Stop + SessionStart + launchd 兜底**
+- `Stop` hook 是主力 —— 用户每发送一条消息、Claude 每响应一次都触发(不是会话结束!很多人对 Stop 语义有误解)。长会话天然增量更新。
+- `SessionStart` hook 在打开新会话时触发,保证"打开 Claude Code 就能看到近期"。
+- launchd 每 2h 作为兜底,防止长期不用后第一次打开等 AI 太久。
+- 所有触发都走 `refresh-bg.sh`:fork 到后台立即返回,不阻塞 hook;用 `mkdir` 原子锁防止并发冲突,10 分钟以上的 stale lock 自动清理。
+
+**hook 配置写入位置**:`~/.claude/settings.json` 的 `hooks.Stop` 和 `hooks.SessionStart` 数组,由 `bin/install-hook.sh` 幂等合并。
 
 ## 认证方案
 
@@ -47,43 +71,59 @@ Claude Code 会话记录以 jsonl 形式存在本地 (`~/.claude/projects/<encod
 
 ```
 claude-mindmap/
-├── PLAN.md                 # 本文件
-├── README.md               # 安装与使用说明 (后续补)
+├── PLAN.md                    # 本文件
+├── README.md                  # 安装与使用说明 (后续补)
 ├── bin/
-│   ├── refresh.sh          # launchd 入口：抽取 + 调用 claude -p + 写缓存
-│   ├── extract.py          # 解析 jsonl，抽取关键字段，压缩上下文
-│   └── render.py           # 读缓存 JSON，用 rich 渲染树
+│   ├── extract.py             # 增量解析 jsonl → cache/sessions/*.json
+│   ├── aggregate.py           # 聚合 sessions 为 AI 输入
+│   ├── refresh.sh             # 编排 extract → aggregate → claude -p
+│   ├── refresh-bg.sh          # 后台 fork + mkdir 锁,供 hook 使用
+│   ├── render.py              # 零依赖 ANSI 树形渲染
+│   ├── install.sh             # 安装 slash command + launchd
+│   └── install-hook.sh        # 幂等合并 hooks 到 settings.json
 ├── prompts/
-│   └── classify.md         # 给 claude -p 的分类/总结提示词
-├── cache/
-│   └── mindmap.json        # AI 输出的结构化结果 (gitignore)
+│   └── classify.md            # 给 claude -p 的分类/总结提示词
+├── cache/                     # 运行时数据 (gitignore)
+│   ├── state.json             # jsonl 增量游标
+│   ├── sessions/<id>.json     # 每个会话的结构化摘要
+│   ├── mindmap.json           # AI 聚合结果
+│   └── refresh.lock.d/        # mkdir 原子锁目录
 ├── launchd/
-│   └── com.bby.claude-mindmap.plist   # launchd 定时任务模板
+│   └── com.bby.claude-mindmap.plist   # LaunchAgent 模板(兜底)
 └── commands/
-    └── mindmap.md          # slash command 模板 (软链到 ~/.claude/commands/)
+    └── mindmap.md             # slash command 模板 (软链到 ~/.claude/commands/)
 ```
 
 ## 数据流
 
 1. **extract.py** 遍历 jsonl，按 cwd 分组，每个会话抽取：session_id、起止时间、首条 user prompt、最后一条 assistant 消息摘要、用过的工具类型。控制在 token 预算内（长会话截断）。
-2. **refresh.sh** 把 extract 结果通过 stdin 喂给 `claude -p --output-format json`，prompt 让 Claude 输出严格 JSON：
+2. **aggregate.py** 读 `cache/sessions/*.json`,过滤 `user_message_count=0` 的壳会话,按 `last_activity_at` 倒序,截前 200 个,输出紧凑 JSON 数组。
+3. **refresh.sh** 拼装 prompt:`classify.md` + `CURRENT_TIME: <now>`(作为时间锚) + aggregate 输出,喂给 `claude -p`。**不使用 `--bare`** —— 该模式不读 OAuth keychain,与我们复用订阅的方案冲突。
+4. 输出 JSON 结构(strict,无 markdown):
    ```json
    {
+     "generated_at": "<ISO-8601 UTC,刷新脚本墙钟覆盖>",
      "projects": [
        {
          "name": "claude-mindmap",
-         "status": "设计阶段",
+         "cwd": "...",
+         "status": "active | paused | done | archived",
          "summary": "...",
-         "sessions": ["abc123", "def456"],
-         "tasks": [
-           {"title": "梳理方案", "done": true},
-           {"title": "写 extract.py", "done": false}
-         ]
+         "progress": "...",
+         "tasks": [{"title": "...", "done": true}],
+         "sessions": ["abc123"],
+         "last_activity_at": "..."
        }
      ]
    }
    ```
-3. **render.py** 用 `rich.tree.Tree` 渲染：项目名（粗体蓝）→ 状态（绿/黄）→ 任务列表（✓/○）。
+   状态语义(实际规则见 `prompts/classify.md`):
+   - **active** — 近 3 天有活动,工作进行中
+   - **paused** — 3–14 天无活动,或更久但有明确"待恢复"信号(未合 MR、开 issue)
+   - **done** — 明确完成(合并、交付、会话里有结论)
+   - **archived** — >14 天无活动且无恢复信号,或一次性探索/失败实验/废弃调试
+   `archived` 项目在渲染时单独分组、折叠为单行,避免污染主视图。
+5. **render.py** 纯 stdlib ANSI 渲染,无 pip 依赖。非 TTY 或 `NO_COLOR` 时自动去色。
 
 ## 增量刷新策略
 
@@ -122,19 +162,21 @@ description: Show work mindmap of recent Claude Code sessions
 Run `python ~/code/claude-mindmap/bin/render.py` and show the output verbatim.
 ```
 
-## 定时任务 (launchd)
+## 定时任务 (launchd,兜底)
 
-每小时触发一次 `bin/refresh.sh`，日志写到 `~/Library/Logs/claude-mindmap.log`。
-用户可通过 `launchctl load/unload` 控制开关。
+LaunchAgent(用户级,`~/Library/LaunchAgents/com.bby.claude-mindmap.plist`),每 2 小时触发一次 `refresh-bg.sh`,日志写到 `~/Library/Logs/claude-mindmap.log`。仅作为 hook 方案的兜底 —— 主力刷新靠 Claude Code 的 `Stop` / `SessionStart` hook。
+
+控制:`launchctl load/unload <plist>`;查看:`launchctl list | grep claude-mindmap`。
 
 ## 里程碑
 
-- [x] M0：梳理方案（本文件）
-- [ ] M1：`extract.py` 能解析 jsonl 并输出结构化摘要
-- [ ] M2：`refresh.sh` 跑通 `claude -p` 并产出 cache JSON
-- [ ] M3：`render.py` 终端渲染效果满意
-- [ ] M4：launchd plist + slash command 安装脚本
-- [ ] M5：README、错误处理、长会话截断策略
+- [x] M0:梳理方案(本文件)
+- [x] M1:`extract.py` 增量解析 jsonl
+- [x] M2:`refresh.sh` 打通 `claude -p` 分类流水线
+- [x] M3:`render.py` ANSI 树形渲染
+- [x] M4:launchd plist + slash command + install.sh
+- [x] M5:`archived` 状态 + Claude Code hook(Stop / SessionStart) + install-hook.sh
+- [ ] M6:README、长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
 
 ## jsonl 结构探针发现
 
