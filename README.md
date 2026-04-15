@@ -179,7 +179,15 @@ claude-mindmap/
   once, or use `/mindmap-refresh`.
 - **Background refresh not firing** — check `~/Library/Logs/claude-mindmap.log`.
   Also `jq .hooks ~/.claude/settings.json` to confirm the hooks are installed.
-  Hooks only apply to sessions started **after** install.
+  **Hooks only apply to Claude Code sessions started *after* `install-hook.sh`.**
+  The session you ran the installer in will not trigger its own Stop hook
+  until you reopen Claude Code. Use `mindmap --refresh` in the meantime.
+- **Mindmap shows stale tasks for the session I'm currently in** — same root
+  cause. The in-flight session's data is being extracted, but until you
+  trigger a refresh (`mindmap --refresh`), the classifier output is frozen.
+  Claude Code also only writes the native `away_summary` recap after the
+  session has been idle for a bit, so very active sessions rely more on the
+  extracted progress signals (`edited_files`, `task_events`, etc.).
 - **"Not logged in · Please run /login"** in the log — run `claude /login`
   once interactively. Do **not** pass `--bare` to `claude -p`; that mode
   refuses to read OAuth credentials from the keychain.

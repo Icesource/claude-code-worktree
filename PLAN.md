@@ -96,7 +96,7 @@ claude-mindmap/
 
 ## 数据流
 
-1. **extract.py** 遍历 jsonl，按 cwd 分组，每个会话抽取：session_id、起止时间、首条 user prompt、最后一条 assistant 消息摘要、用过的工具类型。控制在 token 预算内（长会话截断）。
+1. **extract.py** 遍历 jsonl,每个会话抽取一组结构化信号(见下节"信号权威序"),并通过 `is_automation` 字段标记自指的刷新会话以供下游过滤。长会话按字段级上限(recent prompts 3 条、edited_files 20 个、task_events 20 条)截断,控制 token 预算。
 2. **aggregate.py** 读 `cache/sessions/*.json`,过滤 `user_message_count=0` 的壳会话,按 `last_activity_at` 倒序,截前 200 个,输出紧凑 JSON 数组。
 3. **refresh.sh** 拼装 prompt:`classify.md` + `CURRENT_TIME: <now>`(作为时间锚) + aggregate 输出,喂给 `claude -p`。**不使用 `--bare`** —— 该模式不读 OAuth keychain,与我们复用订阅的方案冲突。
 4. 输出 JSON 结构(strict,无 markdown):
@@ -123,7 +123,32 @@ claude-mindmap/
    - **done** — 明确完成(合并、交付、会话里有结论)
    - **archived** — >14 天无活动且无恢复信号,或一次性探索/失败实验/废弃调试
    `archived` 项目在渲染时单独分组、折叠为单行,避免污染主视图。
-5. **render.py** 纯 stdlib ANSI 渲染,无 pip 依赖。非 TTY 或 `NO_COLOR` 时自动去色。
+5. **render.py** 纯 stdlib ANSI 渲染,无 pip 依赖(刻意不用 `rich` 避免 `pip install` 步骤)。非 TTY 或 `NO_COLOR` 时自动去色。`archived` 项目单独分组折叠到底部,避免污染主视图。
+
+## 信号权威序(关键设计)
+
+**问题发现**:第一版只喂 `first_user_prompt + recap + tools_used` 时,活跃会话因为没有 recap、开头 prompt 又已过时,导致 AI 生成的 tasks 列表严重滞后(会把早已完成的任务标成 `{done: false}`)。
+
+**解法**:extract.py 现在每个会话提取一组"进展轨迹"信号,classify prompt 里明确告诉 AI **按权威序信任**:
+
+| 权威 | 信号 | 含义 |
+|-----|------|------|
+| 1(最强) | `task_events` 里的 `completed:` | 用户显式标记完成,硬事实 |
+| 2 | `edited_files` | Write/Edit 实际写过的文件路径,无法伪造 |
+| 3 | `last_assistant_summary` | 最新一次 assistant 回复首段,通常含结论 |
+| 4 | `recap` (away_summary) | Claude Code 原生摘要,权威但活跃会话上会滞后 |
+| 5 | `recent_user_prompts` (最后 3 条) | 当前关注点 |
+| 6(最弱) | `first_user_prompt` | 原始目标,早已过时 |
+
+**硬规则**:如果 `edited_files` / `last_assistant_summary` / `task_events` 任一明显表明某事已完成,绝不能在 tasks 里标成 `{done: false}`。
+
+## 自指反馈环过滤
+
+`refresh.sh` 会调用 `claude -p` 执行 `classify.md`,这一步本身会在某个 Claude Code 项目目录下写一条新的 jsonl,它的 `first_user_prompt` 是我们自己的 classifier prompt。如果不过滤,下次刷新 AI 就会"看到自己",把这些 headless 刷新请求误当成真实用户会话,产生无意义的 "Claude Mindmap Classifier" 项目并污染结果。
+
+**检测方式**:`extract.py` 里硬编码一组起始匹配(目前是 `"You are analyzing a developer's Claude Code session history"`),命中则给 session 标 `is_automation=True`。`aggregate.py` 在构建 AI 输入时跳过这些。
+
+**注意**:这不是过滤 `claude-mindmap` 项目本身 —— 真实的开发会话(像这次我们迭代 claude-mindmap 的对话)必须保留。只过滤 refresh pipeline 自己触发的 headless 调用。
 
 ## 增量刷新策略
 
@@ -153,14 +178,7 @@ claude-mindmap/
 
 ## Slash Command
 
-`~/.claude/commands/mindmap.md`：
-
-```markdown
----
-description: Show work mindmap of recent Claude Code sessions
----
-Run `python ~/code/claude-mindmap/bin/render.py` and show the output verbatim.
-```
+见 `commands/mindmap.md` 和 `commands/mindmap-refresh.md`。两者都用 `!`-前缀执行 shell,然后要求模型把输出原样放进 fenced code block —— 这是因为 `!` 输出只注入到 prompt 不会自动显示给用户(见"已知风险"一节)。两个命令都配了 `allowed-tools` frontmatter 限制工具范围,降低模型自由发挥的空间。
 
 ## 定时任务 (launchd,兜底)
 
@@ -177,7 +195,36 @@ LaunchAgent(用户级,`~/Library/LaunchAgents/com.bby.claude-mindmap.plist`),每
 - [x] M4:launchd plist + slash command + install.sh
 - [x] M5:`archived` 状态 + Claude Code hook(Stop / SessionStart) + install-hook.sh
 - [x] M6:`/mindmap-refresh` 命令、`bin/mindmap` 零模型 wrapper、README
-- [ ] M7:长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
+- [x] M7:进展信号增强(`recent_user_prompts` / `last_assistant_summary` / `edited_files` / `task_events`)+ 自指反馈环过滤
+- [ ] M8:git log 信号(见"未来扩展")
+- [ ] M9:长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
+
+## 未来扩展
+
+### git log 作为进展信号(M8 候选)
+
+对 `cwd` 落在某个 git 仓库里的会话,可以在 extract 阶段按 session 时间窗跑:
+
+```bash
+git -C <cwd> log --since="<started_at>" --until="<last_activity_at>" \
+    --pretty="%h %s" --no-merges
+```
+
+好处:
+- commit message 是"已完成事实"的最权威来源,比 assistant 的自述更硬
+- 不占 session 内 token,独立 enrich
+- 和 `edited_files` 交叉验证,能识别"写了但没 commit(草稿)" vs "写了且已入库"
+
+待办:
+- 处理 cwd 不是 git 仓库的情况(静默跳过)
+- 处理 cwd 不存在的情况(被 rename / 删除)
+- 处理 worktree 和多分支(取当前 HEAD 即可)
+- 限制每会话 commit 数(比如最多 10 条,避免超长合并洪水)
+- 性能:缓存每仓库每时间窗的结果,避免同一仓库下多个会话反复跑
+
+### Level 1 AI 回填(M9 的一部分)
+
+历史会话里只有约 8% 有原生 `away_summary`,其余完全靠 extract 信号 + classifier 推理。可以加一个 Level 1 步骤:对 `recap is None` 且信号稀薄的会话,单独用 `claude -p` 生成 ~2 句摘要写回 `cache/sessions/<id>.json` 的 `recap` 字段。只做一次,后续增量命中。
 
 ## 触发命令的设计取舍
 
@@ -220,9 +267,27 @@ Claude Code 的会话 recap 以 `system` + `subtype: "away_summary"` 写入 json
 **这是关键发现**:Level 1 单会话摘要可以直接读这个字段,零 AI 调用。
 回退策略:若某会话没有 `away_summary`(会话太短、老版本、已被关闭 recap),才走原始消息抽取 + `claude -p` 生成摘要。
 
-## 已知风险
+## 已知风险与坑
 
-- jsonl 格式随 Claude Code 版本变动：用宽松解析，字段缺失时跳过
-- `claude -p` 在无 TTY 环境下的行为需验证（launchd 启动时没有终端）
-- 订阅额度消耗：定时任务频率不宜过高，默认每小时，可调
-- 长历史 token 超限：extract 阶段做截断 + 摘要压缩
+### 版本 / 格式耦合
+- jsonl 结构和 `system.subtype = away_summary` 是 Claude Code 内部格式,随版本可能变动。`extract.py` 用宽松解析,字段缺失时跳过,不 crash。
+- `load_session` 会剔除 schema 中不存在的字段再构造 dataclass,允许本工具自身迭代 schema 时缓存平滑迁移。添加新字段只需给 dataclass 加默认值,无需清缓存。
+
+### `claude -p` 认证踩坑
+**`--bare` 模式与本方案互斥**。官方文档说 bare 模式"严格只读 `ANTHROPIC_API_KEY` 或 `apiKeyHelper`,不读 OAuth / keychain"。我们依赖 Claude Code 订阅 OAuth 凭据,所以 refresh.sh 绝不能加 `--bare`,否则会得到 `Not logged in · Please run /login`。
+
+### Hook 绑定生命周期
+Claude Code 的 Stop / SessionStart hook **只对 `install-hook.sh` 之后开启的会话生效**。当前正在使用的会话不会被它自己的 hook 触发,唯一的刷新路径是 `mindmap --refresh` / `/mindmap-refresh` / launchd 兜底。README troubleshooting 已说明。
+
+### 后台刷新的静默性
+`refresh-bg.sh` fork 到后台立即返回,用户完全看不到它跑。验证办法只有 `tail -f ~/Library/Logs/claude-mindmap.log`。这是设计(不打断)而不是 bug。
+
+### Slash command 的模型不可避免
+Claude Code 没给用户注册纯 handler 命令的接口,`~/.claude/commands/*.md` 本质是发给模型的 prompt 模板。想"零模型 + `/`-自动补全"两全其美目前不可能。我们接受这个现实,提供双路径(见"触发命令的设计取舍")。
+
+顺带一个曾经踩过的坑:slash command 里 `!` 前缀运行的 shell 输出会注入到**模型的 prompt 里**,不会显示给用户。所以 `/mindmap` 命令里必须显式要求模型"原样输出到 fenced code block",否则用户看不到任何东西,只看到模型说了句"已展示脑图"。
+
+### 订阅额度 / Token 消耗
+- 每次 refresh 一次 `claude -p` 调用,输入是 100+ 会话的压缩摘要(当前约 50 KB),不算便宜但可接受
+- 真正的 token 杀手是"长会话"—— 如果单会话的 edited_files / task_events 特别长,aggregate 会被撑大。当前用字段级上限截断,但还没做跨会话的总量上限 —— 未来可以加 `TOTAL_INPUT_TOKENS_BUDGET`
+- 触发频率:Stop hook 每轮都触发,但增量模式下 mindmap 实际重新生成只在"有会话变化 + 锁空闲"时发生,稳态成本很低
