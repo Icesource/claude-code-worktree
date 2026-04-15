@@ -164,17 +164,42 @@ claude-mindmap/
 ### 会话级缓存
 `cache/sessions/<session_id>.json` 保存每个会话的结构化摘要。只有内容变化过的会话才重新生成摘要。
 
-### 两级 AI 调用
-- **Level 1(单会话摘要,频繁,便宜)**
-  只对变化过的会话生成摘要 → 写 `sessions/<id>.json`。
-  若 jsonl 中已有 Claude Code 原生 recap 字段,直接复用,零 AI 调用。
-- **Level 2(跨项目聚合,低频,稍贵)**
-  把所有单会话摘要聚合送给 `claude -p`,产出 `mindmap.json`。
-  触发条件:有 ≥N 个会话变化,或距上次聚合超过 X 小时。
+### "增量"这个词的范围(容易混淆,必读)
 
-### 稳态成本
-- 全量:每次 ~所有会话数 次 AI 调用
-- 增量:大多数周期 0 次调用;偶尔 Level 1 处理 1-2 个活跃会话;Level 2 聚合输入是压缩摘要,token 很小
+**增量只发生在 `extract.py` 这一层**,不在 AI 调用层:
+
+```
+jsonl 文件 ──[extract.py: mtime + byte_offset 增量]──> cache/sessions/*.json
+                                                              │
+                                                              ▼ (aggregate.py 全量读本地)
+                                                      aggregate_input.json
+                                                              │
+                              ┌───────────── hash 短路 ──────┤
+                              ▼                              ▼
+                    复用旧 mindmap.json          (claude -p 全量送 AI)
+                    (仅刷 generated_at)                mindmap.json
+```
+
+- `extract.py` 稳态下只读几百字节追加数据 → 毫秒级
+- `aggregate.py` 每次全量拼 session 本地文件 → 零成本
+- `claude -p` 一旦触发就是**全量**送 100+ 会话的压缩摘要(~50KB),**不是 AI 层的增量**
+
+### 为什么不做 AI 层的增量(只送变化会话 + patch 输出)
+
+讨论过,**刻意不做**。理由:
+- 只送变化会话 → AI 失去跨项目上下文,不知道该会话并入哪个已有项目
+- 要保留上下文就必须把现有 `mindmap.json` 也喂回去当参照,输入反而接近全量
+- patch 型输出更难约束,容易错位、丢项目、状态一致性难保证
+- 边际收益小、风险大
+
+### 真正的 AI 省钱机制:Hash 短路 + Prompt Caching
+
+1. **Hash 短路(已实现)**:`refresh.sh` 对 `aggregate_input.json` 算 SHA256,存 `cache/last_input.sha256`。下次运行若 hash 未变,直接复用 `mindmap.json` 只刷新 `generated_at`,**完全跳过 `claude -p`**。稳态下(没新会话活动)0 AI 调用。
+2. **Prompt Caching**:`claude -p` 自动缓存重复的 prompt 前缀(`classify.md` 指令部分),Anthropic cache TTL 5 分钟。频繁触发时天然命中,真正计费的只有新增 sessions 的 token 差量。
+
+### Level 1 AI 回填(规划中,未实现)
+
+对没有原生 `away_summary` 的老会话(实测 ~92%),可以单独跑一次 `claude -p` 生成 2 句摘要写回 `cache/sessions/<id>.json` 的 `recap` 字段,一次性成本,之后增量命中。见"未来扩展"。
 
 ## Slash Command
 
@@ -196,8 +221,10 @@ LaunchAgent(用户级,`~/Library/LaunchAgents/com.bby.claude-mindmap.plist`),每
 - [x] M5:`archived` 状态 + Claude Code hook(Stop / SessionStart) + install-hook.sh
 - [x] M6:`/mindmap-refresh` 命令、`bin/mindmap` 零模型 wrapper、README
 - [x] M7:进展信号增强(`recent_user_prompts` / `last_assistant_summary` / `edited_files` / `task_events`)+ 自指反馈环过滤
-- [ ] M8:git log 信号(见"未来扩展")
-- [ ] M9:长会话 token 截断策略、Level 1 AI 回填(为无 recap 的老会话生成摘要)
+- [x] M8:全局锁迁入 `refresh.sh`、hash 短路跳过未变化 AI 调用、`claude -p` 超时保护
+- [ ] M9:git log 信号(见"未来扩展")
+- [ ] M10:退化场景兜底(超时自适应 / 熔断 / 降级告警)
+- [ ] M11:长会话 token 总量上限、Level 1 AI 回填
 
 ## 未来扩展
 
@@ -286,6 +313,26 @@ Claude Code 的 Stop / SessionStart hook **只对 `install-hook.sh` 之后开启
 Claude Code 没给用户注册纯 handler 命令的接口,`~/.claude/commands/*.md` 本质是发给模型的 prompt 模板。想"零模型 + `/`-自动补全"两全其美目前不可能。我们接受这个现实,提供双路径(见"触发命令的设计取舍")。
 
 顺带一个曾经踩过的坑:slash command 里 `!` 前缀运行的 shell 输出会注入到**模型的 prompt 里**,不会显示给用户。所以 `/mindmap` 命令里必须显式要求模型"原样输出到 fenced code block",否则用户看不到任何东西,只看到模型说了句"已展示脑图"。
+
+### 并发控制 & 超时保护
+
+- **单一全局锁**:`refresh.sh` 用 `mkdir cache/refresh.lock.d` 原子锁,**整个 pipeline(含 extract/aggregate/claude -p)都串行化**。任何路径(slash command、`mindmap --refresh`、hook、launchd)都会撞到同一把锁。`refresh-bg.sh` 只是 fire-and-forget 的 fork 包装,不自己持锁。
+- **为什么锁要放在 refresh.sh 里**:早期版本锁放在 refresh-bg.sh,导致 `mindmap --refresh`(前台)与 hook 触发的 bg(后台)共享 `_prompt.txt` / `_raw_output.txt` 但互不感知,并发时互相覆盖,直接导致前台 JSON 解析失败。
+- **抢锁失败 = 立即放弃,不排队**:这是刻意设计。hook 在长会话里会高频触发,如果排队,早期的过时刷新会堆在后面没意义。`refresh.sh` 抢锁失败就 `exit 0`,日志写一行 `refresh already running, skip`。
+- **claude -p 超时**:`refresh.sh` 用 `perl -e 'alarm ...; exec'` 给 `claude -p` 套 180s 硬超时(可通过 `CLAUDE_MINDMAP_TIMEOUT` 环境变量覆盖)。超时则非零退出,**不写 hash**,下次重新尝试。
+- **Stale lock 回收**:锁目录修改时间 > 240s 就视为崩溃遗留,自动清掉重抢。这个阈值必须大于 `claude -p` 超时(180s)+ 预留 buffer,否则正常慢运行会被误判。
+
+### 退化场景(已记录,暂未兜底)
+
+**超时始终失败导致永远拿不到新结果**:如果每次 `claude -p` 都跑超 180s(例如输入规模失控、模型持续限流),hash 永远不更新,每次调用都从头超时,`mindmap.json` 停在上次成功的快照。用户看到的是"数据不再新鲜但不报错"—— 静默降级,不算 crash,但需要用户主动看日志才能发现。
+
+未来可选缓解:
+- 超时自适应:每次失败把超时值放大(180 → 300 → 600),几次后停止尝试
+- 失败时缩减输入:按 `last_activity_at` 丢弃最旧的会话,剩下重试
+- 熔断:连续 N 次失败后,写一个 `cache/circuit_open` 标记,跳过所有刷新直到用户手动清除
+- 用户可见降级:渲染时若日志显示最近几次都失败,在树顶部加一行告警
+
+暂不实现,等真有复现再加。
 
 ### 订阅额度 / Token 消耗
 - 每次 refresh 一次 `claude -p` 调用,输入是 100+ 会话的压缩摘要(当前约 50 KB),不算便宜但可接受
