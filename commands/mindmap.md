@@ -1,5 +1,6 @@
 ---
-description: Show a tree-view mindmap of recent Claude Code work
+description: Show the cached Claude Code work mindmap
+allowed-tools: Bash(python3:*)
 ---
 
-Run `python3 ~/code/claude-mindmap/bin/render.py` and show the output to me verbatim inside a fenced code block. Do not add commentary, do not interpret the result — I just want to see the rendered tree.
+!`python3 ~/code/claude-mindmap/bin/render.py`
