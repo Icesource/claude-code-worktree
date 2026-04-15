@@ -63,6 +63,9 @@ if not raw.startswith("{"):
     if i != -1 and j != -1:
         raw = raw[i:j+1]
 data = json.loads(raw)
+# Always stamp with wall-clock time; don't trust the model's guess.
+from datetime import datetime, timezone
+data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 json.dump(data, open(sys.argv[2], "w"), indent=2, ensure_ascii=False)
 print(f"[refresh] wrote {sys.argv[2]} with {len(data.get('projects', []))} projects")
 PY
