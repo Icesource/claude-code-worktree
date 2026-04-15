@@ -6,9 +6,31 @@ You will be given a JSON array of session summaries. Each entry has:
 - `cwd`: working directory of the session
 - `started_at` / `last_activity_at`: timestamps
 - `message_count`: total messages exchanged
-- `first_user_prompt`: the opening request (may be truncated)
+- `first_user_prompt`: the opening request (may be truncated) — describes
+  *what the user set out to do*
+- `recent_user_prompts`: up to 3 most recent user prompts — describes
+  *where the conversation currently stands / what's being asked right now*
+- `last_assistant_summary`: first paragraph of the most recent assistant
+  text reply — often an explicit "here's what I did" summary
+- `edited_files`: files touched by Write/Edit tool calls — concrete
+  evidence of what was built or changed
+- `task_events`: TaskCreate/TaskUpdate events ("created: …",
+  "completed: #id", "in_progress: #id") — a live progress log when the
+  user relies on the task tool
 - `recap`: Claude Code's native session recap if available (authoritative)
 - `tools_used`: tool names invoked during the session
+
+**Trusting the signals (in order of authority)**:
+1. `task_events` with `completed:` — highest confidence "this got done"
+2. `edited_files` — if a file was written, that work happened
+3. `last_assistant_summary` — usually reflects the most recent state
+4. `recap` — authoritative but may lag on very active sessions
+5. `recent_user_prompts` — what the user is currently focused on
+6. `first_user_prompt` — only the *original* goal, often stale by now
+
+**Crucial**: do NOT list as a `{done: false}` task something that the
+`edited_files`, `last_assistant_summary`, or `task_events` fields clearly
+show was completed. Prefer the most recent signal when they conflict.
 
 Your job:
 

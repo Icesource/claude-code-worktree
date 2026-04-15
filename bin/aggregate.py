@@ -33,6 +33,9 @@ def main() -> int:
             continue
         if d.get("user_message_count", 0) < MIN_USER_MESSAGES:
             continue
+        if d.get("is_automation"):
+            # Self-referential classify runs produced by refresh.sh — skip.
+            continue
         entries.append(
             {
                 "session_id": d.get("session_id"),
@@ -41,6 +44,10 @@ def main() -> int:
                 "last_activity_at": d.get("last_activity_at"),
                 "message_count": d.get("message_count", 0),
                 "first_user_prompt": (d.get("first_user_prompt") or "")[:300],
+                "recent_user_prompts": d.get("recent_user_prompts", [])[-3:],
+                "last_assistant_summary": d.get("last_assistant_summary"),
+                "edited_files": d.get("edited_files", [])[-15:],
+                "task_events": d.get("task_events", [])[-15:],
                 "recap": d.get("recap"),
                 "tools_used": d.get("tools_used", [])[:10],
             }

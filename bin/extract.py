@@ -39,6 +39,12 @@ class SessionSummary:
     first_user_prompt: str | None = None
     recap: str | None = None  # away_summary content (latest wins)
     tools_used: list[str] = field(default_factory=list)
+    # --- progress signals (richer input for the classifier) ---
+    recent_user_prompts: list[str] = field(default_factory=list)  # last 3 real prompts
+    last_assistant_summary: str | None = None  # first paragraph of most recent text reply
+    edited_files: list[str] = field(default_factory=list)  # unique Write/Edit targets
+    task_events: list[str] = field(default_factory=list)  # "created: …" / "completed: …"
+    is_automation: bool = False  # set true for self-referential classify/agent runs
 
 
 def load_state() -> dict[str, dict[str, Any]]:
@@ -57,7 +63,10 @@ def load_session(session_id: str) -> SessionSummary | None:
     if not path.exists():
         return None
     data = json.loads(path.read_text())
-    return SessionSummary(**data)
+    # Drop unknown keys so SessionSummary(**data) doesn't choke after a
+    # schema change. New fields pick up their dataclass defaults.
+    valid = {f.name for f in SessionSummary.__dataclass_fields__.values()}
+    return SessionSummary(**{k: v for k, v in data.items() if k in valid})
 
 
 def save_session(summary: SessionSummary) -> None:
@@ -83,6 +92,31 @@ def extract_text_from_message(msg: Any) -> str:
     return ""
 
 
+RECENT_PROMPT_LIMIT = 3
+EDITED_FILES_LIMIT = 20
+TASK_EVENTS_LIMIT = 20
+PROMPT_TRIM = 300
+SUMMARY_TRIM = 400
+# Self-referential detection: refresh.sh feeds classify.md to `claude -p`,
+# which in turn creates a new jsonl. We must skip these so the tool doesn't
+# "see itself" and pollute the classifier input.
+AUTOMATION_PROMPT_MARKERS = (
+    "You are analyzing a developer's Claude Code session history",
+)
+
+
+def _is_automation_prompt(text: str) -> bool:
+    return any(text.lstrip().startswith(m) for m in AUTOMATION_PROMPT_MARKERS)
+
+
+def _first_paragraph(text: str) -> str:
+    for chunk in text.split("\n\n"):
+        chunk = chunk.strip()
+        if chunk:
+            return chunk
+    return text.strip()
+
+
 def apply_record(summary: SessionSummary, rec: dict[str, Any]) -> None:
     t = rec.get("type")
     ts = rec.get("timestamp")
@@ -102,17 +136,54 @@ def apply_record(summary: SessionSummary, rec: dict[str, Any]) -> None:
         if text and not rec.get("toolUseResult"):
             summary.user_message_count += 1
             if summary.first_user_prompt is None:
-                summary.first_user_prompt = text[:500]
+                summary.first_user_prompt = text[:PROMPT_TRIM]
+                if _is_automation_prompt(text):
+                    summary.is_automation = True
+            summary.recent_user_prompts.append(text[:PROMPT_TRIM])
+            if len(summary.recent_user_prompts) > RECENT_PROMPT_LIMIT:
+                summary.recent_user_prompts = summary.recent_user_prompts[-RECENT_PROMPT_LIMIT:]
     elif t == "assistant":
         summary.message_count += 1
         msg = rec.get("message") or {}
         content = msg.get("content") if isinstance(msg, dict) else None
         if isinstance(content, list):
+            text_parts = []
             for block in content:
-                if isinstance(block, dict) and block.get("type") == "tool_use":
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "tool_use":
                     name = block.get("name")
                     if name and name not in summary.tools_used:
                         summary.tools_used.append(name)
+                    inp = block.get("input") or {}
+                    # Track files touched by Write/Edit for concrete "what got done" signal.
+                    if name in ("Write", "Edit", "NotebookEdit"):
+                        fp = inp.get("file_path") or inp.get("notebook_path")
+                        if fp and fp not in summary.edited_files:
+                            summary.edited_files.append(fp)
+                            if len(summary.edited_files) > EDITED_FILES_LIMIT:
+                                summary.edited_files = summary.edited_files[-EDITED_FILES_LIMIT:]
+                    # Task tool usage is a direct progress log when the user relies on it.
+                    elif name == "TaskCreate":
+                        subj = (inp.get("subject") or "").strip()
+                        if subj:
+                            summary.task_events.append(f"created: {subj[:120]}")
+                    elif name == "TaskUpdate":
+                        status = (inp.get("status") or "").strip()
+                        tid = inp.get("taskId")
+                        if status and tid:
+                            summary.task_events.append(f"{status}: #{tid}")
+                    if len(summary.task_events) > TASK_EVENTS_LIMIT:
+                        summary.task_events = summary.task_events[-TASK_EVENTS_LIMIT:]
+                elif btype == "text":
+                    txt = block.get("text", "")
+                    if txt:
+                        text_parts.append(txt)
+            if text_parts:
+                combined = "\n\n".join(text_parts).strip()
+                if combined:
+                    summary.last_assistant_summary = _first_paragraph(combined)[:SUMMARY_TRIM]
     elif t == "system":
         if rec.get("subtype") == "away_summary":
             content = rec.get("content")
