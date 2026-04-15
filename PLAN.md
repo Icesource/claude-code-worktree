@@ -85,6 +85,32 @@ claude-mindmap/
    ```
 3. **render.py** 用 `rich.tree.Tree` 渲染：项目名（粗体蓝）→ 状态（绿/黄）→ 任务列表（✓/○）。
 
+## 增量刷新策略
+
+全量轮询成本过高,采用多级增量:
+
+### 文件级增量
+维护 `cache/state.json`,记录每个 jsonl 的 `{path, mtime, byte_offset}`:
+- mtime 未变 → 整文件跳过
+- mtime 变了 → 从 `byte_offset` 继续读到 EOF(jsonl 只追加)
+- 新文件 → 从头读
+- 读完后更新 offset
+
+### 会话级缓存
+`cache/sessions/<session_id>.json` 保存每个会话的结构化摘要。只有内容变化过的会话才重新生成摘要。
+
+### 两级 AI 调用
+- **Level 1(单会话摘要,频繁,便宜)**
+  只对变化过的会话生成摘要 → 写 `sessions/<id>.json`。
+  若 jsonl 中已有 Claude Code 原生 recap 字段,直接复用,零 AI 调用。
+- **Level 2(跨项目聚合,低频,稍贵)**
+  把所有单会话摘要聚合送给 `claude -p`,产出 `mindmap.json`。
+  触发条件:有 ≥N 个会话变化,或距上次聚合超过 X 小时。
+
+### 稳态成本
+- 全量:每次 ~所有会话数 次 AI 调用
+- 增量:大多数周期 0 次调用;偶尔 Level 1 处理 1-2 个活跃会话;Level 2 聚合输入是压缩摘要,token 很小
+
 ## Slash Command
 
 `~/.claude/commands/脑图.md`：
@@ -109,6 +135,37 @@ description: 显示工作项目脑图
 - [ ] M3：`render.py` 终端渲染效果满意
 - [ ] M4：launchd plist + slash command 安装脚本
 - [ ] M5：README、错误处理、长会话截断策略
+
+## jsonl 结构探针发现
+
+实际文件:`~/.claude/projects/<encoded-cwd>/<session-uuid>.jsonl`,每行一个 JSON 对象,追加写入。
+
+**消息类型 (`type` 字段)**
+- `user` — 用户消息 / tool_result
+- `assistant` — 模型输出
+- `system` — 系统事件,通过 `subtype` 区分
+- `attachment` — 附件
+- `file-history-snapshot` — 文件快照
+- `permission-mode` — 权限模式切换
+
+**通用字段**
+`uuid` / `parentUuid` / `timestamp` / `cwd` / `sessionId`,可用于串联消息、溯源、按目录聚合。
+
+**recap 原生落盘 ✨**
+Claude Code 的会话 recap 以 `system` + `subtype: "away_summary"` 写入 jsonl:
+
+```json
+{
+  "type": "system",
+  "subtype": "away_summary",
+  "content": "<recap 文本>",
+  "timestamp": "...",
+  "uuid": "..."
+}
+```
+
+**这是关键发现**:Level 1 单会话摘要可以直接读这个字段,零 AI 调用。
+回退策略:若某会话没有 `away_summary`(会话太短、老版本、已被关闭 recap),才走原始消息抽取 + `claude -p` 生成摘要。
 
 ## 已知风险
 
