@@ -3,4 +3,6 @@ description: Force refresh the mindmap cache then show it
 allowed-tools: Bash(bash:*), Bash(python3:*)
 ---
 
-!`bash ~/code/claude-mindmap/bin/refresh.sh && python3 ~/code/claude-mindmap/bin/render.py`
+Output the text below verbatim inside a fenced code block (```text ... ```). Write nothing else — no greeting, no summary, no explanation, just the code block.
+
+!`bash ~/code/claude-mindmap/bin/refresh.sh >/dev/null 2>&1 && python3 ~/code/claude-mindmap/bin/render.py`
