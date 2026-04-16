@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Fire-and-forget wrapper for refresh.sh, intended for Claude Code hooks.
+# Fire-and-forget wrapper for refresh.sh (claude-code-worktree).
 # Returns immediately so it never blocks the Stop/SessionStart hook.
 #
 # Concurrency is handled inside refresh.sh itself (mkdir-based lock), so
@@ -8,7 +8,13 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-LOG="$HOME/Library/Logs/claude-mindmap.log"
+
+# Platform-aware log location.
+if [ "$(uname)" = "Darwin" ]; then
+  LOG="$HOME/Library/Logs/claude-code-worktree.log"
+else
+  LOG="${XDG_STATE_HOME:-$HOME/.local/state}/claude-code-worktree/refresh.log"
+fi
 
 mkdir -p "$(dirname "$LOG")"
 

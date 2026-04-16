@@ -1,4 +1,4 @@
-# Claude Mindmap
+# Claude Code Worktree (Design Notes)
 
 一个为 Claude Code 提供"会话脑图"能力的本地工具：定时读取历史会话，用 AI 自动分类工作项目与进展，最终通过 `/mindmap` 命令在终端以 shell 风格树状图呈现。
 
@@ -89,7 +89,7 @@ claude-mindmap/
 │   ├── mindmap.json           # AI 聚合结果
 │   └── refresh.lock.d/        # mkdir 原子锁目录
 ├── launchd/
-│   └── com.bby.claude-mindmap.plist   # LaunchAgent 模板(兜底)
+│   └── com.claude-code-worktree.plist   # LaunchAgent 模板(兜底)
 └── commands/
     └── mindmap.md             # slash command 模板 (软链到 ~/.claude/commands/)
 ```
@@ -207,7 +207,7 @@ jsonl 文件 ──[extract.py: mtime + byte_offset 增量]──> cache/session
 
 ## 定时任务 (launchd,兜底)
 
-LaunchAgent(用户级,`~/Library/LaunchAgents/com.bby.claude-mindmap.plist`),每 2 小时触发一次 `refresh-bg.sh`,日志写到 `~/Library/Logs/claude-mindmap.log`。仅作为 hook 方案的兜底 —— 主力刷新靠 Claude Code 的 `Stop` / `SessionStart` hook。
+LaunchAgent(用户级,`~/Library/LaunchAgents/com.claude-code-worktree.plist`),每 2 小时触发一次 `refresh-bg.sh`,日志写到 `~/Library/Logs/claude-code-worktree.log`。仅作为 hook 方案的兜底 —— 主力刷新靠 Claude Code 的 `Stop` / `SessionStart` hook。
 
 控制:`launchctl load/unload <plist>`;查看:`launchctl list | grep claude-mindmap`。
 
@@ -307,7 +307,7 @@ Claude Code 的会话 recap 以 `system` + `subtype: "away_summary"` 写入 json
 Claude Code 的 Stop / SessionStart hook **只对 `install-hook.sh` 之后开启的会话生效**。当前正在使用的会话不会被它自己的 hook 触发,唯一的刷新路径是 `mindmap --refresh` / `/mindmap-refresh` / launchd 兜底。README troubleshooting 已说明。
 
 ### 后台刷新的静默性
-`refresh-bg.sh` fork 到后台立即返回,用户完全看不到它跑。验证办法只有 `tail -f ~/Library/Logs/claude-mindmap.log`。这是设计(不打断)而不是 bug。
+`refresh-bg.sh` fork 到后台立即返回,用户完全看不到它跑。验证办法只有 `tail -f ~/Library/Logs/claude-code-worktree.log`。这是设计(不打断)而不是 bug。
 
 ### Slash command 的模型不可避免
 Claude Code 没给用户注册纯 handler 命令的接口,`~/.claude/commands/*.md` 本质是发给模型的 prompt 模板。想"零模型 + `/`-自动补全"两全其美目前不可能。我们接受这个现实,提供双路径(见"触发命令的设计取舍")。
@@ -319,15 +319,15 @@ Claude Code 没给用户注册纯 handler 命令的接口,`~/.claude/commands/*.
 - **单一全局锁**:`refresh.sh` 用 `mkdir cache/refresh.lock.d` 原子锁,**整个 pipeline(含 extract/aggregate/claude -p)都串行化**。任何路径(slash command、`mindmap --refresh`、hook、launchd)都会撞到同一把锁。`refresh-bg.sh` 只是 fire-and-forget 的 fork 包装,不自己持锁。
 - **为什么锁要放在 refresh.sh 里**:早期版本锁放在 refresh-bg.sh,导致 `mindmap --refresh`(前台)与 hook 触发的 bg(后台)共享 `_prompt.txt` / `_raw_output.txt` 但互不感知,并发时互相覆盖,直接导致前台 JSON 解析失败。
 - **抢锁失败 = 立即放弃,不排队**:这是刻意设计。hook 在长会话里会高频触发,如果排队,早期的过时刷新会堆在后面没意义。`refresh.sh` 抢锁失败就 `exit 0`,日志写一行 `refresh already running, skip`。
-- **claude -p 超时**:`refresh.sh` 用 `perl -e 'alarm ...; exec'` 给 `claude -p` 套 180s 硬超时(可通过 `CLAUDE_MINDMAP_TIMEOUT` 环境变量覆盖)。超时则非零退出,**不写 hash**,下次重新尝试。
-- **Stale lock 回收**:锁目录修改时间 > 240s 就视为崩溃遗留,自动清掉重抢。这个阈值必须大于 `claude -p` 超时(180s)+ 预留 buffer,否则正常慢运行会被误判。
+- **claude -p 超时**:`refresh.sh` 用 `perl -e 'alarm ...; exec'` 给 `claude -p` 套 600s 硬超时(可通过 `CLAUDE_MINDMAP_TIMEOUT` 环境变量覆盖)。超时则非零退出,**不写 hash**,下次重新尝试。
+- **Stale lock 回收**:锁目录修改时间 > 660s 就视为崩溃遗留,自动清掉重抢。这个阈值必须大于 `claude -p` 超时(600s)+ 预留 buffer,否则正常慢运行会被误判。
 
 ### 退化场景(已记录,暂未兜底)
 
-**超时始终失败导致永远拿不到新结果**:如果每次 `claude -p` 都跑超 180s(例如输入规模失控、模型持续限流),hash 永远不更新,每次调用都从头超时,`mindmap.json` 停在上次成功的快照。用户看到的是"数据不再新鲜但不报错"—— 静默降级,不算 crash,但需要用户主动看日志才能发现。
+**超时始终失败导致永远拿不到新结果**:如果每次 `claude -p` 都跑超 600s(例如输入规模失控、模型持续限流),hash 永远不更新,每次调用都从头超时,`mindmap.json` 停在上次成功的快照。用户看到的是"数据不再新鲜但不报错"—— 静默降级,不算 crash,但需要用户主动看日志才能发现。
 
 未来可选缓解:
-- 超时自适应:每次失败把超时值放大(180 → 300 → 600),几次后停止尝试
+- 超时自适应:每次失败把超时值放大(600 → 900 → 1200),几次后停止尝试
 - 失败时缩减输入:按 `last_activity_at` 丢弃最旧的会话,剩下重试
 - 熔断:连续 N 次失败后,写一个 `cache/circuit_open` 标记,跳过所有刷新直到用户手动清除
 - 用户可见降级:渲染时若日志显示最近几次都失败,在树顶部加一行告警

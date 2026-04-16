@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Refresh the claude-mindmap cache.
+# Refresh the claude-code-worktree cache.
 # 1. Incrementally extract session summaries from ~/.claude/projects
 # 2. Aggregate them; if content hash matches last run, skip the AI call
 # 3. Otherwise feed to `claude -p` for cross-project classification
@@ -24,10 +24,12 @@ mkdir -p "$CACHE_DIR"
 if ! mkdir "$LOCK_DIR" 2>/dev/null; then
   # Stale lock recovery: >10 minutes old, assume crashed and reclaim.
   if [ -d "$LOCK_DIR" ]; then
-    # Stale threshold must be > CLAUDE_TIMEOUT_SECS (180s) so the legit
+    # Stale threshold must be > CLAUDE_TIMEOUT_SECS (600s) so the legit
     # slowest run finishes before any other caller reclaims the lock.
-    lock_age=$(( $(date +%s) - $(stat -f %m "$LOCK_DIR" 2>/dev/null || echo 0) ))
-    if [ "$lock_age" -gt 240 ]; then
+    # stat -f %m is macOS; stat -c %Y is Linux.
+    lock_mtime=$(stat -f %m "$LOCK_DIR" 2>/dev/null || stat -c %Y "$LOCK_DIR" 2>/dev/null || echo 0)
+    lock_age=$(( $(date +%s) - lock_mtime ))
+    if [ "$lock_age" -gt 660 ]; then
       rm -rf "$LOCK_DIR"
       mkdir "$LOCK_DIR"
     else
@@ -72,7 +74,8 @@ PY
   exit 0
 fi
 
-echo "[refresh] input changed, feeding $n_sessions sessions to claude -p..."
+input_kb=$(( $(wc -c < "$INPUT_FILE") / 1024 ))
+echo "[refresh] input changed, feeding $n_sessions sessions (${input_kb}KB) to claude -p..."
 
 # Build the full prompt: instructions + input data.
 NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -87,29 +90,52 @@ FULL_PROMPT_FILE="$CACHE_DIR/_prompt.txt"
   cat "$INPUT_FILE"
 } > "$FULL_PROMPT_FILE"
 
+prompt_kb=$(( $(wc -c < "$FULL_PROMPT_FILE") / 1024 ))
+
 # Run claude headless, with a timeout so a stuck run cannot block everyone.
+# We use --output-format json to capture token usage metrics.
 # macOS has no `timeout` binary; `perl -e 'alarm ...; exec'` is portable.
 # We intentionally do NOT use --bare: that mode refuses to read the OAuth
 # login from the keychain, and our whole plan is to reuse the user's
 # existing Claude Code subscription auth.
 # --disallowedTools keeps the model from spawning tools — we want a pure
 # text-in/text-out classification.
-CLAUDE_TIMEOUT_SECS="${CLAUDE_MINDMAP_TIMEOUT:-180}"
+CLAUDE_TIMEOUT_SECS="${CLAUDE_MINDMAP_TIMEOUT:-600}"
+t_start=$(date +%s)
 if ! perl -e 'alarm shift @ARGV; exec @ARGV' "$CLAUDE_TIMEOUT_SECS" \
     claude -p \
-      --output-format text \
+      --output-format json \
       --disallowedTools "Bash Edit Write Read Glob Grep" \
       < "$FULL_PROMPT_FILE" \
-      > "$CACHE_DIR/_raw_output.txt"; then
+      > "$CACHE_DIR/_raw_output.json"; then
   rc=$?
-  echo "[refresh] claude -p failed or timed out after ${CLAUDE_TIMEOUT_SECS}s (rc=$rc), abandoning" >&2
+  t_elapsed=$(( $(date +%s) - t_start ))
+  echo "[refresh] claude -p failed or timed out after ${t_elapsed}s (rc=$rc), abandoning" >&2
+  echo "[refresh]   prompt=${prompt_kb}KB  sessions=$n_sessions" >&2
   exit 1
 fi
+t_elapsed=$(( $(date +%s) - t_start ))
 
-# Extract JSON: strip code fences if present, then validate.
-python3 - "$CACHE_DIR/_raw_output.txt" "$OUTPUT_FILE" <<'PY'
+# Extract the text result and usage stats from JSON envelope, then parse
+# the mindmap JSON from the model's text output.
+python3 - "$CACHE_DIR/_raw_output.json" "$OUTPUT_FILE" "$prompt_kb" "$t_elapsed" <<'PY'
 import json, re, sys
-raw = open(sys.argv[1]).read().strip()
+
+envelope = json.load(open(sys.argv[1]))
+prompt_kb = sys.argv[3]
+elapsed = sys.argv[4]
+
+# --- Log usage stats --------------------------------------------------------
+usage = envelope.get("usage", {})
+in_tok = usage.get("input_tokens", 0) + usage.get("cache_read_input_tokens", 0)
+cache_create = usage.get("cache_creation_input_tokens", 0)
+out_tok = usage.get("output_tokens", 0)
+cost = envelope.get("total_cost_usd", 0)
+print(f"[refresh] usage: in={in_tok} (+{cache_create} cache-create) out={out_tok} "
+      f"cost=${cost:.4f} prompt={prompt_kb}KB elapsed={elapsed}s")
+
+# --- Extract mindmap JSON from model text -----------------------------------
+raw = (envelope.get("result") or "").strip()
 m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
 if m:
     raw = m.group(1)

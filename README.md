@@ -1,205 +1,229 @@
-# claude-mindmap
+# claude-code-worktree
 
-A local tool that reads your Claude Code session history, uses `claude -p` to
-classify sessions into projects, and renders a terminal mindmap of your recent
-work — available from inside Claude Code via `/mindmap`.
+A local tool that reads your Claude Code session history, uses AI to classify
+sessions into projects, and renders a terminal tree of your recent work.
+
+[中文文档](docs/README.zh-CN.md)
+
+## Demo
 
 ```
-Claude Mindmap  (generated 1m ago)
+Claude Code Worktree  (generated 2m ago)
 ────────────────────────────────────────────────────────────
-├── claude-mindmap  [● active]  4m ago  4 sessions
-│   Building a tool that reads Claude Code session histories...
-│   progress: Incremental session extraction done (103 sessions). Next:
-│             write classify prompt and refresh.sh.
+├── my-saas-app  [● active]  4m ago  6 sessions
+│   ~/code/my-saas-app
+│   Building user authentication and dashboard features.
+│   progress: OAuth integration done. Working on role-based
+│             access control for the admin panel.
 │   tasks:
-│     ├─ ✓ Extract sessions from JSONL (extract.py)
-│     ├─ ○ Write classify/summarize prompt
-│     └─ ○ Terminal mindmap rendering
+│     ├─ ✓ Set up OAuth2 login flow
+│     ├─ ✓ Design dashboard layout
+│     ├─ ○ Implement RBAC for admin panel
+│     └─ ○ Add unit tests for auth middleware
 │
-├── hsfops  [● active]  5h ago  22 sessions
-│   ...
+├── data-pipeline  [● active]  2h ago  8 sessions
+│   ~/code/data-pipeline
+│   ETL pipeline for processing analytics events from Kafka.
+│   progress: Kafka consumer and transform stages complete.
+│             Writing the BigQuery sink connector.
+│   tasks:
+│     ├─ ✓ Kafka consumer with offset tracking
+│     ├─ ✓ JSON schema validation stage
+│     ├─ ○ BigQuery sink connector
+│     └─ ○ Dead-letter queue handling
 │
-└── archived (3)
-    ├─ mstest (HSF invoke testing)  (7d ago, 1s)
-    ├─ v2rayN troubleshooting       (14h ago, 1s)
-    └─ misc short sessions          (6h ago, 29s)
+├── blog-redesign  [◐ paused]  5d ago  3 sessions
+│   ~/code/blog
+│   Migrating blog from Jekyll to Astro with new theme.
+│   progress: Content migration done. Paused waiting for
+│             design review from the team.
+│   tasks:
+│     ├─ ✓ Migrate markdown content
+│     ├─ ✓ Set up Astro project structure
+│     └─ ○ Apply new theme and deploy
+│
+└── archived (2)
+    ├─ dotfiles (shell config cleanup)    (10d ago, 2s)
+    └─ scratch-pad (one-off experiments)  (21d ago, 5s)
 ```
 
 ## How it works
 
-1. **`bin/extract.py`** incrementally reads `~/.claude/projects/**/*.jsonl`
-   (tracking `{mtime, offset}` per file in `cache/state.json`) and writes a
-   structured summary per session to `cache/sessions/<id>.json`. It prefers
-   Claude Code's native `away_summary` recap when present, so most sessions
-   cost zero AI calls.
-2. **`bin/aggregate.py`** reads those session summaries, drops noise, sorts by
-   recency, and emits compact JSON for the classifier.
-3. **`bin/refresh.sh`** feeds that JSON plus `prompts/classify.md` to
-   `claude -p` (reusing your Claude Code subscription — no extra API key),
-   producing `cache/mindmap.json`.
-4. **`bin/render.py`** reads `mindmap.json` and prints a colored tree using
-   only Python stdlib (no `rich`, no `pip install`).
-5. **`/mindmap`** is a slash command that runs `render.py` inside Claude Code
-   and shows the tree verbatim.
+1. **`bin/extract.py`** — Incrementally reads `~/.claude/projects/**/*.jsonl`
+   (tracking `{mtime, offset}` per file) and writes a structured summary per
+   session to `cache/sessions/<id>.json`. Prefers Claude Code's native
+   `away_summary` recap when present, so most sessions cost zero AI calls.
+2. **`bin/aggregate.py`** — Reads session summaries, drops noise, sorts by
+   recency, emits compact JSON for the classifier.
+3. **`bin/refresh.sh`** — Feeds JSON + `prompts/classify.md` to `claude -p`
+   (reuses your Claude Code subscription — no extra API key), producing
+   `cache/mindmap.json`. Logs token usage and cost per run.
+4. **`bin/render.py`** — Reads `mindmap.json` and prints a colored tree using
+   only Python stdlib (no `pip install` needed).
+5. **`mindmap`** — Shell wrapper for instant rendering (`!mindmap` inside
+   Claude Code).
 
 ## Triggers
 
-The mindmap cache is refreshed automatically by three cooperating sources:
+The cache is refreshed automatically by cooperating sources:
 
-| Source | When it fires | Role |
-|--------|---------------|------|
-| Claude Code `Stop` hook | After **every response turn** | Primary — keeps data fresh while you work |
-| Claude Code `SessionStart` hook | When you open a Claude Code session | Primary — ensures an up-to-date mindmap when you return |
-| macOS LaunchAgent (launchd) | Every 2 hours | Fallback — runs regardless of whether Claude Code is open |
+| Source | When it fires | Platform |
+|--------|---------------|----------|
+| Claude Code `Stop` hook | After every response turn | All |
+| Claude Code `SessionStart` hook | When you open a session | All |
+| macOS LaunchAgent (launchd) | Every 2 hours (fallback) | macOS only |
 
-All triggers go through `bin/refresh-bg.sh`, which forks to the background and
-returns immediately (hooks never block) and uses an atomic `mkdir` lock to
-prevent concurrent runs.
+All triggers go through `bin/refresh-bg.sh`, which forks to the background
+(hooks never block) and uses an atomic `mkdir` lock to prevent concurrent runs.
 
-> **Note on the `Stop` hook name**: `Stop` fires at the end of each response
-> turn, not at session end. In a long-running conversation it fires after every
-> Claude reply, so data stays fresh naturally.
+> **Note**: The `Stop` hook fires at the end of each response turn, not at
+> session end. Data stays fresh naturally during active conversations.
+
+Linux/WSL users can set up an equivalent cron job or systemd timer — see
+[Install](#install) for details.
 
 ## Requirements
 
-- macOS (launchd plist is mac-specific; everything else is portable)
 - Python 3.9+
-- `claude` CLI in `$PATH`, logged in (`claude /login` or the regular OAuth flow)
+- `claude` CLI in `$PATH`, logged in
 - An active Claude Code subscription (Pro/Max) — refresh uses your subscription
   quota, no separate `ANTHROPIC_API_KEY` needed
+- macOS or Linux (Windows via WSL)
 
 ## Install
 
 ```bash
-git clone <this-repo> ~/code/claude-mindmap
-cd ~/code/claude-mindmap
+git clone https://github.com/user/claude-code-worktree.git ~/code/claude-code-worktree
+cd ~/code/claude-code-worktree
 
-# 1. Symlinks /mindmap + /mindmap-refresh slash commands, loads the
-#    LaunchAgent fallback.
+# 1. Symlink slash commands + shell wrapper (+ LaunchAgent on macOS)
 bash bin/install.sh
 
-# 2. Merges Stop + SessionStart hooks into ~/.claude/settings.json.
-#    Idempotent: re-running won't create duplicates.
+# 2. Merge Stop + SessionStart hooks into ~/.claude/settings.json
+#    Idempotent — re-running won't create duplicates.
 bash bin/install-hook.sh
 
-# 3. Prime the cache once so /mindmap has something to show immediately.
+# 3. Prime the cache (first run calls claude -p, takes ~30s)
 bash bin/refresh.sh
 ```
 
-After step 3 you can type `/mindmap` in any Claude Code session.
+After step 3, type `/mindmap` in any Claude Code session.
 
 ## Usage
 
-There are two ways to view the mindmap, pick whichever fits the moment:
-
-### Zero-model path (fast, recommended)
-
-`install.sh` symlinks a `mindmap` wrapper into `~/.local/bin`, so you can run:
+### Zero-model path (instant, recommended)
 
 ```bash
-mindmap              # render cached mindmap
+mindmap              # render cached tree
 mindmap --refresh    # force refresh first, then render
 ```
 
-Inside Claude Code, use the `!` shell-passthrough prefix to get the same
-zero-model behavior:
+Inside Claude Code, use `!` to bypass the model:
 
 ```
 !mindmap
 !mindmap --refresh
 ```
 
-This bypasses the model entirely — output is instant, no tokens used.
-The downside is `!`-commands don't tab-complete.
+### Slash commands (tab-complete, goes through model)
 
-### Slash-command path (tab-completes, goes through model)
+- **`/mindmap`** — show the cached tree
+- **`/mindmap-refresh`** — force refresh, then show
 
-Claude Code does not currently support user-registered handler commands that
-bypass the model (see `PLAN.md` for details). The markdown slash commands
-below tab-complete on `/`, but each invocation makes a tiny model round-trip
-to echo the rendered tree.
-
-- **`/mindmap`** — show the current cached mindmap
-- **`/mindmap-refresh`** — force refresh first, then show the result. Use
-  right after install, or after a long break before hooks/launchd have
-  caught up.
-
-### Plain shell (for debugging)
+### Shell (for debugging)
 
 ```bash
-bash ~/code/claude-mindmap/bin/refresh.sh    # regenerate cache (blocking)
-python3 ~/code/claude-mindmap/bin/render.py  # just render
-tail -f ~/Library/Logs/claude-mindmap.log    # watch background refreshes
+bash ~/code/claude-code-worktree/bin/refresh.sh    # regenerate cache
+python3 ~/code/claude-code-worktree/bin/render.py  # just render
+tail -f ~/Library/Logs/claude-code-worktree.log    # watch refreshes (macOS)
 ```
 
-## Project statuses
+## Cost & Performance
 
-The classifier assigns each project one of four statuses:
+Each refresh that triggers `claude -p` logs token usage to the refresh log:
 
-- **`● active`** — activity within the last 3 days, work clearly ongoing
-- **`◐ paused`** — 3–14 days idle, or longer but with a clear resume signal
-  (open MRs, filed issues, unfinished todos)
-- **`✓ done`** — explicitly finished (merged, delivered, report submitted)
-- **`▪ archived`** — >14 days idle with no resume signal, or throwaway
-  exploratory/debug sessions. Archived projects are collapsed to one line
-  each at the bottom of the tree so they don't pollute the main view.
+```
+[refresh] usage: in=18200 (+0 cache-create) out=1500 cost=$0.0234 prompt=42KB elapsed=15s
+```
+
+- **Hash shortcut**: If no session data changed since the last successful run,
+  the AI call is skipped entirely (zero cost).
+- **Incremental extraction**: Only new bytes in jsonl files are read.
+- **Typical cost**: ~$0.01–0.05 per refresh depending on session count.
+
+## Project Statuses
+
+| Status | Symbol | Rule |
+|--------|--------|------|
+| `active` | `●` green | Activity within 3 days |
+| `paused` | `◐` yellow | 3–14 days idle, or has resume signals |
+| `done` | `✓` dim | Explicitly finished |
+| `archived` | `▪` dim | >14 days idle, no resume signal |
+
+Archived projects collapse to one line at the bottom of the tree.
+
+## Comparison with Similar Tools
+
+| Feature | claude-code-worktree | [Claude Code Canvas](https://github.com/raulriera/claude-code-canvas) | [cc-lens](https://github.com/) | [Claude Code Viewer](https://github.com/d-kimuson/claude-code-viewer) |
+|---------|---------------------|-------|---------|------|
+| AI project classification | Yes | No | No | No |
+| Progress tracking | Yes (tasks, status) | No | No | No |
+| Terminal-native | Yes (zero deps) | No (browser) | No (browser) | No (browser) |
+| Auto background refresh | Yes (hooks + launchd) | No | No | No |
+| Token/cost analytics | No | No | Yes | No |
+| Session replay | No | No | Yes | Yes |
+| Zero extra cost | Yes (reuses subscription) | N/A | N/A | N/A |
 
 ## Files
 
 ```
-claude-mindmap/
+claude-code-worktree/
 ├── bin/
-│   ├── mindmap            # user-facing wrapper (symlinked to ~/.local/bin)
+│   ├── mindmap            # shell wrapper (symlinked to ~/.local/bin)
 │   ├── extract.py         # incremental JSONL parser
 │   ├── aggregate.py       # build compact classifier input
 │   ├── refresh.sh         # orchestrate extract → claude -p → mindmap.json
-│   ├── refresh-bg.sh      # fire-and-forget wrapper + mkdir lock
+│   ├── refresh-bg.sh      # fire-and-forget wrapper for hooks
 │   ├── render.py          # zero-dep ANSI tree renderer
 │   ├── install.sh         # slash commands + shell wrapper + LaunchAgent
-│   └── install-hook.sh    # merges hooks into ~/.claude/settings.json
+│   └── install-hook.sh    # merge hooks into ~/.claude/settings.json
 ├── prompts/
-│   └── classify.md        # prompt given to claude -p
+│   └── classify.md        # prompt for claude -p classifier
 ├── commands/
 │   ├── mindmap.md         # /mindmap slash command
 │   └── mindmap-refresh.md # /mindmap-refresh slash command
 ├── launchd/
-│   └── com.bby.claude-mindmap.plist
-├── cache/                 # runtime state (gitignored)
-│   ├── state.json         # per-file mtime + offset cursors
-│   ├── sessions/<id>.json # structured summary per session
-│   ├── mindmap.json       # latest AI classification
-│   └── refresh.lock.d/    # atomic lock directory
-├── PLAN.md
-└── README.md
+│   └── com.claude-code-worktree.plist  # macOS periodic fallback
+├── docs/
+│   └── README.zh-CN.md   # Chinese documentation
+└── cache/                 # runtime state (gitignored)
 ```
 
 ## Troubleshooting
 
 - **`/mindmap` says "No mindmap cache found"** — run `bash bin/refresh.sh`
   once, or use `/mindmap-refresh`.
-- **Background refresh not firing** — check `~/Library/Logs/claude-mindmap.log`.
-  Also `jq .hooks ~/.claude/settings.json` to confirm the hooks are installed.
-  **Hooks only apply to Claude Code sessions started *after* `install-hook.sh`.**
-  The session you ran the installer in will not trigger its own Stop hook
-  until you reopen Claude Code. Use `mindmap --refresh` in the meantime.
-- **Mindmap shows stale tasks for the session I'm currently in** — same root
-  cause. The in-flight session's data is being extracted, but until you
-  trigger a refresh (`mindmap --refresh`), the classifier output is frozen.
-  Claude Code also only writes the native `away_summary` recap after the
-  session has been idle for a bit, so very active sessions rely more on the
-  extracted progress signals (`edited_files`, `task_events`, etc.).
-- **"Not logged in · Please run /login"** in the log — run `claude /login`
-  once interactively. Do **not** pass `--bare` to `claude -p`; that mode
-  refuses to read OAuth credentials from the keychain.
-- **Cache feels stale** — use `/mindmap-refresh`, or check the log to see if
-  runs are being skipped by the lock (which is fine) or erroring out.
+- **Background refresh not firing** — check the log file.
+  Also verify hooks: `jq .hooks ~/.claude/settings.json`. Hooks only apply to
+  sessions started *after* `install-hook.sh` runs.
+- **"Not logged in"** — run `claude /login` once. Do not pass `--bare` to
+  `claude -p`.
+- **Stale data** — use `mindmap --refresh`. Check the log for skipped or failed
+  runs.
 
 ## Uninstall
 
 ```bash
-launchctl unload ~/Library/LaunchAgents/com.bby.claude-mindmap.plist
-rm ~/Library/LaunchAgents/com.bby.claude-mindmap.plist
+# macOS
+launchctl unload ~/Library/LaunchAgents/com.claude-code-worktree.plist
+rm ~/Library/LaunchAgents/com.claude-code-worktree.plist
+
+# All platforms
 rm ~/.claude/commands/mindmap.md ~/.claude/commands/mindmap-refresh.md
-# Then edit ~/.claude/settings.json and remove the refresh-bg.sh entries
-# from hooks.Stop and hooks.SessionStart.
+rm ~/.local/bin/mindmap
+# Edit ~/.claude/settings.json and remove the refresh-bg.sh hook entries
 ```
+
+## License
+
+MIT

@@ -93,7 +93,7 @@ def render(data: dict) -> str:
     projects = data.get("projects", [])
     generated = data.get("generated_at", "?")
 
-    header = c(BOLD, "Claude Mindmap")
+    header = c(BOLD, "Claude Code Worktree")
     age = c(DIM, f"  (generated {humanize_age(generated)})")
     out.append(f"{header}{age}")
     out.append(c(DIM, "─" * 60))

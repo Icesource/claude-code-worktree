@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install Claude Code hooks for claude-mindmap.
+# Install Claude Code hooks for claude-code-worktree.
 # Merges Stop and SessionStart hooks into ~/.claude/settings.json so that
 # mindmap refreshes after every response turn and on session start.
 #

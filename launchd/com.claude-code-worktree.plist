@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.bby.claude-mindmap</string>
+    <string>com.claude-code-worktree</string>
 
     <key>ProgramArguments</key>
     <array>
@@ -18,10 +18,10 @@
     <false/>
 
     <key>StandardOutPath</key>
-    <string>__HOME__/Library/Logs/claude-mindmap.log</string>
+    <string>__HOME__/Library/Logs/claude-code-worktree.log</string>
 
     <key>StandardErrorPath</key>
-    <string>__HOME__/Library/Logs/claude-mindmap.log</string>
+    <string>__HOME__/Library/Logs/claude-code-worktree.log</string>
 
     <key>EnvironmentVariables</key>
     <dict>
