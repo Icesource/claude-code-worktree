@@ -165,16 +165,11 @@ AI classifier is skipped entirely when nothing changed.
 ## Uninstall
 
 ```bash
-# Remove slash commands and CLI wrapper
-rm ~/.claude/commands/mindmap.md ~/.claude/commands/mindmap-refresh.md
-rm ~/.local/bin/mindmap
-
-# macOS: remove LaunchAgent
-launchctl unload ~/Library/LaunchAgents/com.claude-code-worktree.plist
-rm ~/Library/LaunchAgents/com.claude-code-worktree.plist
-
-# Edit ~/.claude/settings.json and remove the refresh-bg.sh hook entries
+bash bin/uninstall.sh
 ```
+
+Removes slash commands, CLI wrapper, Claude Code hooks, and macOS LaunchAgent.
+The repo itself is left untouched — delete it manually if you want.
 
 ## License
 

@@ -129,15 +129,11 @@ mindmap --refresh    # 先刷新再渲染
 ## 卸载
 
 ```bash
-rm ~/.claude/commands/mindmap.md ~/.claude/commands/mindmap-refresh.md
-rm ~/.local/bin/mindmap
-
-# macOS
-launchctl unload ~/Library/LaunchAgents/com.claude-code-worktree.plist
-rm ~/Library/LaunchAgents/com.claude-code-worktree.plist
-
-# 编辑 ~/.claude/settings.json 删除 refresh-bg.sh 相关 hook 条目
+bash bin/uninstall.sh
 ```
+
+会移除 slash 命令、CLI 封装、Claude Code hooks 和 macOS LaunchAgent。
+仓库本身不会被删除。
 
 ## 许可证
 

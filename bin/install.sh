@@ -54,12 +54,19 @@ with open(path) as f:
 
 hooks = data.setdefault("hooks", {})
 
+# Clean up any stale entries (e.g. from a previous install path or rename).
+for event in list(hooks.keys()):
+    hooks[event] = [
+        e for e in hooks[event]
+        if not any(
+            "refresh-bg.sh" in h.get("command", "")
+            and ("claude-code-worktree" in h["command"] or "claude-mindmap" in h["command"])
+            for h in e.get("hooks", [])
+        )
+    ]
+
 def ensure_hook(event_name: str) -> None:
     entries = hooks.setdefault(event_name, [])
-    for entry in entries:
-        for h in entry.get("hooks", []):
-            if h.get("command") == hook_cmd:
-                return
     entries.append({
         "hooks": [{"type": "command", "command": hook_cmd}]
     })
