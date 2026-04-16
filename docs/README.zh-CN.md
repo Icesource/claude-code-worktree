@@ -46,8 +46,14 @@ cd ~/code/claude-code-worktree
 bash bin/install.sh
 ```
 
-一条命令完成所有事:创建 slash 命令符号链接、安装 `mindmap` CLI、配置 Claude
-Code 自动刷新 hooks、加载 macOS 定时任务(如适用)、并首次生成缓存。
+一条命令完成所有事:安装 slash 命令、CLI 封装、Claude Code hooks 和
+macOS 定时任务(如适用)。安装过程不会触发模型调用。
+
+然后生成你的第一棵工作树:
+
+```bash
+mindmap --refresh
+```
 
 ### 环境要求
 
@@ -91,16 +97,31 @@ mindmap --refresh    # 先刷新再渲染
 
 ## 成本与性能
 
+分类默认使用 **Haiku** 模型,快速且便宜。三层保护防止不必要的开销:
+
+1. **冷却期**(15 分钟)— 上次刷新后短时间内跳过 AI 调用
+2. **哈希跳过** — 会话数据未变化时跳过 AI 调用
+3. **增量提取** — 只读取 session 文件中的新增字节
+
 | 场景 | 花费 |
 |------|------|
-| 会话数据未变化 | **$0**(哈希跳过,不调用 AI) |
-| 典型刷新(~50 个会话) | ~$0.01–0.05 |
+| 冷却期内 | **$0**(跳过 AI 调用) |
+| 会话数据未变化 | **$0**(哈希跳过) |
+| 典型刷新(~100 个会话) | ~$0.01–0.05 |
 
 每次 AI 调用在日志中记录 token 用量:
 
 ```
 [refresh] usage: in=18200 (+0 cache-create) out=1500 cost=$0.0234 prompt=42KB elapsed=15s
 ```
+
+可通过环境变量覆盖默认值:
+
+| 变量 | 默认值 | 说明 |
+|------|--------|------|
+| `CLAUDE_WORKTREE_COOLDOWN_SECS` | `900`(15 分钟) | AI 调用最小间隔 |
+| `CLAUDE_WORKTREE_MODEL` | `claude-haiku-4-5-20251001` | 分类用模型 |
+| `CLAUDE_WORKTREE_TIMEOUT` | `600`(10 分钟) | `claude -p` 超时 |
 
 ## 项目状态
 

@@ -69,13 +69,6 @@ if [ "$OS" = "Darwin" ]; then
   else
     echo "[4/4] LaunchAgent not found, skipping"
   fi
-  # Also clean up old-name plist if present
-  OLD_PLIST="$HOME_DIR/Library/LaunchAgents/com.bby.claude-mindmap.plist"
-  if [ -f "$OLD_PLIST" ]; then
-    launchctl unload "$OLD_PLIST" 2>/dev/null || true
-    rm "$OLD_PLIST"
-    echo "      also removed legacy LaunchAgent"
-  fi
 else
   echo "[4/4] not macOS, skipping LaunchAgent removal"
   echo "      If you added a cron job, remove it manually: crontab -e"

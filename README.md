@@ -58,9 +58,14 @@ cd ~/code/claude-code-worktree
 bash bin/install.sh
 ```
 
-One command does everything: symlinks the slash commands, installs the `mindmap`
-CLI wrapper, sets up Claude Code hooks for auto-refresh, loads the macOS
-LaunchAgent (if on macOS), and primes the cache.
+One command does everything: installs slash commands, CLI wrapper, Claude Code
+hooks, and macOS LaunchAgent (if on macOS). No model calls during install.
+
+Then generate your first worktree:
+
+```bash
+mindmap --refresh
+```
 
 ### Requirements
 
@@ -108,10 +113,18 @@ All refreshes run in the background and never block your work.
 
 ## Cost & Performance
 
+Classification uses **Haiku** by default — fast and cheap. Three layers of
+protection prevent unnecessary spending:
+
+1. **Cooldown** (15 min) — skips AI call if last refresh was recent
+2. **Hash shortcut** — skips AI call if session data hasn't changed
+3. **Incremental extraction** — only reads new bytes from session files
+
 | Scenario | Cost |
 |----------|------|
-| Session data unchanged | **$0** (hash shortcut skips AI call) |
-| Typical refresh (~50 sessions) | ~$0.01–0.05 |
+| Within cooldown window | **$0** (AI call skipped) |
+| Session data unchanged | **$0** (hash shortcut) |
+| Typical refresh (~100 sessions) | ~$0.01–0.05 |
 
 Every AI call logs token usage to `~/Library/Logs/claude-code-worktree.log`
 (macOS) or `~/.local/state/claude-code-worktree/refresh.log` (Linux):
@@ -120,8 +133,13 @@ Every AI call logs token usage to `~/Library/Logs/claude-code-worktree.log`
 [refresh] usage: in=18200 (+0 cache-create) out=1500 cost=$0.0234 prompt=42KB elapsed=15s
 ```
 
-Extraction is incremental (only new bytes in session files are read), and the
-AI classifier is skipped entirely when nothing changed.
+Override defaults via environment variables:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `CLAUDE_WORKTREE_COOLDOWN_SECS` | `900` (15 min) | Min seconds between AI calls |
+| `CLAUDE_WORKTREE_MODEL` | `claude-haiku-4-5-20251001` | Model for classification |
+| `CLAUDE_WORKTREE_TIMEOUT` | `600` (10 min) | Timeout for `claude -p` call |
 
 ## Project Statuses
 

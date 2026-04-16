@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # One-step installer for claude-code-worktree.
-# Sets up: slash commands, shell wrapper, Claude Code hooks, periodic
-# background refresh (macOS only), and primes the cache.
+# Sets up: slash commands, shell wrapper, Claude Code hooks, and periodic
+# background refresh (macOS only). Does NOT trigger a model call.
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -12,15 +12,15 @@ echo "Installing claude-code-worktree..."
 echo
 
 # --- 1. Slash commands -------------------------------------------------------
+# Commands use __REPO__ as a placeholder; we substitute and copy (not symlink)
+# so the installed command always has the correct absolute path.
 COMMANDS_DIR="$HOME_DIR/.claude/commands"
 mkdir -p "$COMMANDS_DIR"
 for cmd in mindmap mindmap-refresh; do
-  link="$COMMANDS_DIR/$cmd.md"
-  if [ -L "$link" ] || [ -f "$link" ]; then
-    rm "$link"
-  fi
-  ln -s "$REPO_ROOT/commands/$cmd.md" "$link"
-  echo "[1/5] linked slash command: /$(basename "$cmd")"
+  src="$REPO_ROOT/commands/$cmd.md"
+  dst="$COMMANDS_DIR/$cmd.md"
+  sed "s|__REPO__|$REPO_ROOT|g" "$src" > "$dst"
+  echo "[1/4] installed slash command: /$cmd"
 done
 
 # --- 2. Shell wrapper --------------------------------------------------------
@@ -31,7 +31,7 @@ if [ -L "$BIN_LINK" ] || [ -f "$BIN_LINK" ]; then
   rm "$BIN_LINK"
 fi
 ln -s "$REPO_ROOT/bin/mindmap" "$BIN_LINK"
-echo "[2/5] linked shell wrapper: mindmap -> $REPO_ROOT/bin/mindmap"
+echo "[2/4] linked shell wrapper: mindmap -> $REPO_ROOT/bin/mindmap"
 if ! echo ":$PATH:" | grep -q ":$LOCAL_BIN:"; then
   echo "      WARNING: $LOCAL_BIN is not in \$PATH"
   echo "      Add to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -77,7 +77,7 @@ ensure_hook("SessionStart")
 with open(path, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 PY
-echo "[3/5] installed Claude Code hooks (Stop + SessionStart)"
+echo "[3/4] installed Claude Code hooks (Stop + SessionStart)"
 
 # --- 4. Periodic background refresh (platform-specific) ----------------------
 if [ "$OS" = "Darwin" ]; then
@@ -90,26 +90,19 @@ if [ "$OS" = "Darwin" ]; then
 
   launchctl unload "$PLIST_DST" 2>/dev/null || true
   launchctl load "$PLIST_DST"
-  echo "[4/5] loaded launchd fallback timer (every 2h)"
+  echo "[4/4] loaded launchd fallback timer (every 2h)"
 else
-  echo "[4/5] skipped launchd (not macOS)"
+  echo "[4/4] skipped launchd (not macOS)"
   echo "      Optional: set up a cron job for periodic refresh:"
   echo "        0 */2 * * * bash $REPO_ROOT/bin/refresh-bg.sh"
 fi
 
-# --- 5. Prime cache -----------------------------------------------------------
-echo "[5/5] priming cache (first run, may take ~30s)..."
-if bash "$REPO_ROOT/bin/refresh.sh"; then
-  echo
-  echo "Done! Try it now:"
-else
-  echo
-  echo "Cache priming failed (you may not be logged in to Claude Code)."
-  echo "Run 'claude /login' first, then 'bash $REPO_ROOT/bin/refresh.sh'."
-  echo
-  echo "Once cached, try:"
-fi
-echo "  mindmap              # in any terminal"
-echo "  !mindmap             # inside Claude Code (zero-model, instant)"
-echo "  /mindmap             # inside Claude Code (tab-completes)"
-echo "  mindmap --refresh    # force refresh then show"
+echo
+echo "Done! To generate your first worktree:"
+echo
+echo "  mindmap --refresh    # in any terminal"
+echo "  !mindmap --refresh   # inside Claude Code (zero-model)"
+echo "  /mindmap-refresh     # inside Claude Code (tab-completes)"
+echo
+echo "After that, the tree refreshes automatically in the background."
+echo "View it anytime with: mindmap"

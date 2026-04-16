@@ -113,7 +113,7 @@ prompt_kb=$(( $(wc -c < "$FULL_PROMPT_FILE") / 1024 ))
 # existing Claude Code subscription auth.
 # --disallowedTools keeps the model from spawning tools — we want a pure
 # text-in/text-out classification.
-CLAUDE_TIMEOUT_SECS="${CLAUDE_MINDMAP_TIMEOUT:-600}"
+CLAUDE_TIMEOUT_SECS="${CLAUDE_WORKTREE_TIMEOUT:-600}"
 CLAUDE_MODEL="${CLAUDE_WORKTREE_MODEL:-claude-haiku-4-5-20251001}"
 t_start=$(date +%s)
 if ! perl -e 'alarm shift @ARGV; exec @ARGV' "$CLAUDE_TIMEOUT_SECS" \
