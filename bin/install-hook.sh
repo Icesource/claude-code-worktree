@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
 # Install Claude Code hooks for claude-code-worktree.
-# Merges Stop and SessionStart hooks into ~/.claude/settings.json so that
-# mindmap refreshes after every response turn and on session start.
+# NOTE: install.sh already includes this step. This script exists for
+# re-installing hooks independently if needed.
 #
-# The hook command is refresh-bg.sh, which forks into the background and
-# returns immediately — it never blocks the hook.
+# Merges Stop and SessionStart hooks into ~/.claude/settings.json so that
+# the worktree refreshes after every response turn and on session start.
 
 set -euo pipefail
 

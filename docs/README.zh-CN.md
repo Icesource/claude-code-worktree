@@ -1,10 +1,12 @@
 # claude-code-worktree
 
-一个本地工具,读取你的 Claude Code 会话历史,用 AI 将会话自动分类为项目,并在终端渲染工作树。
+AI 驱动的终端工作树 — 自动将 Claude Code 会话分类为项目并追踪进度。
 
 [English](../README.md)
 
-## 效果预览
+## 效果
+
+读取你的 Claude Code 会话历史,用 AI 自动分类,直接在终端渲染工作全景:
 
 ```
 Claude Code Worktree  (generated 2m ago)
@@ -36,71 +38,34 @@ Claude Code Worktree  (generated 2m ago)
     └─ scratch-pad (临时实验)       (21d ago, 5s)
 ```
 
-## 工作原理
-
-1. **`bin/extract.py`** — 增量读取 `~/.claude/projects/**/*.jsonl`,按文件追踪
-   `{mtime, offset}`,为每个会话生成结构化摘要。优先使用 Claude Code 的原生
-   `away_summary`,大多数会话零 AI 开销。
-2. **`bin/aggregate.py`** — 读取会话摘要,过滤噪声,按时间排序,输出紧凑 JSON。
-3. **`bin/refresh.sh`** — 将 JSON + 分类提示词喂给 `claude -p`(复用你的 Claude
-   Code 订阅认证,无需额外 API Key),生成 `cache/mindmap.json`。每次运行记录
-   token 用量和花费。
-4. **`bin/render.py`** — 读取 `mindmap.json`,用 Python 标准库渲染彩色树形图
-   (无需 `pip install`)。
-5. **`mindmap`** — Shell 封装,即时渲染(在 Claude Code 中用 `!mindmap`)。
-
-## 自动触发
-
-| 触发源 | 触发时机 | 平台 |
-|--------|---------|------|
-| Claude Code `Stop` Hook | 每次响应结束后 | 全平台 |
-| Claude Code `SessionStart` Hook | 打开会话时 | 全平台 |
-| macOS LaunchAgent (launchd) | 每 2 小时(兜底) | 仅 macOS |
-
-所有触发器通过 `bin/refresh-bg.sh` 后台运行,使用 `mkdir` 原子锁防止并发。
-
-> **说明**: `Stop` hook 在每次响应结束时触发,不是会话结束。活跃对话期间数据
-> 自然保持新鲜。
-
-Linux/WSL 用户可设置等效的 cron 定时任务,详见安装步骤。
-
-## 环境要求
-
-- Python 3.9+
-- `claude` CLI 已安装且已登录
-- Claude Code 有效订阅(Pro/Max)— 刷新使用你的订阅额度,无需单独的
-  `ANTHROPIC_API_KEY`
-- macOS 或 Linux(Windows 通过 WSL)
-
 ## 安装
 
 ```bash
-git clone https://github.com/user/claude-code-worktree.git ~/code/claude-code-worktree
+git clone https://github.com/Icesource/claude-code-worktree.git ~/code/claude-code-worktree
 cd ~/code/claude-code-worktree
-
-# 1. 创建符号链接(slash 命令 + shell 封装 + macOS 定时任务)
 bash bin/install.sh
-
-# 2. 将 Stop + SessionStart hook 合并到 ~/.claude/settings.json
-#    幂等操作,重复运行不会创建重复项。
-bash bin/install-hook.sh
-
-# 3. 首次生成缓存(第一次运行会调用 claude -p,约 30 秒)
-bash bin/refresh.sh
 ```
 
-安装完成后,在任意 Claude Code 会话中输入 `/mindmap`。
+一条命令完成所有事:创建 slash 命令符号链接、安装 `mindmap` CLI、配置 Claude
+Code 自动刷新 hooks、加载 macOS 定时任务(如适用)、并首次生成缓存。
 
-## 使用方式
+### 环境要求
 
-### 零模型路径(即时,推荐)
+- Python 3.9+
+- `claude` CLI 已安装且已登录
+- Claude Code 有效订阅(Pro/Max)— 复用现有额度,无需单独 API Key
+- macOS 或 Linux(Windows 通过 WSL)
+
+## 使用
+
+### 终端(即时,零模型开销)
 
 ```bash
 mindmap              # 渲染缓存的树形图
 mindmap --refresh    # 先刷新再渲染
 ```
 
-在 Claude Code 中,用 `!` 前缀绕过模型:
+在 Claude Code 中,用 `!` 前缀获得同样的即时输出:
 
 ```
 !mindmap
@@ -109,48 +74,71 @@ mindmap --refresh    # 先刷新再渲染
 
 ### Slash 命令(支持 Tab 补全,经过模型)
 
-- **`/mindmap`** — 显示缓存的树形图
-- **`/mindmap-refresh`** — 强制刷新后显示
+```
+/mindmap             # 显示缓存的树形图
+/mindmap-refresh     # 强制刷新后显示
+```
+
+## 自动刷新
+
+工作树自动保持新鲜,正常使用无需手动刷新:
+
+- **每次 Claude Code 响应后** — `Stop` hook 触发后台刷新
+- **会话启动时** — `SessionStart` hook 确保数据最新
+- **每 2 小时** — macOS LaunchAgent 兜底(Linux 可配置 cron,见安装输出)
+
+所有刷新在后台运行,不会阻塞你的工作。
 
 ## 成本与性能
 
-每次触发 `claude -p` 的刷新会在日志中记录 token 用量:
+| 场景 | 花费 |
+|------|------|
+| 会话数据未变化 | **$0**(哈希跳过,不调用 AI) |
+| 典型刷新(~50 个会话) | ~$0.01–0.05 |
+
+每次 AI 调用在日志中记录 token 用量:
 
 ```
 [refresh] usage: in=18200 (+0 cache-create) out=1500 cost=$0.0234 prompt=42KB elapsed=15s
 ```
 
-- **哈希跳过**: 如果会话数据未变化,完全跳过 AI 调用(零成本)。
-- **增量提取**: 只读取 jsonl 文件中的新增字节。
-- **典型花费**: 每次刷新约 $0.01–0.05,取决于会话数量。
-
 ## 项目状态
 
-| 状态 | 符号 | 规则 |
+| 状态 | 图标 | 条件 |
 |------|------|------|
-| `active` | `●` 绿色 | 3 天内有活动 |
-| `paused` | `◐` 黄色 | 3-14 天空闲,或有恢复信号 |
-| `done` | `✓` 灰色 | 明确完成 |
-| `archived` | `▪` 灰色 | 超过 14 天空闲且无恢复信号 |
+| active | `●` | 3 天内有活动 |
+| paused | `◐` | 3-14 天空闲,或有恢复信号 |
+| done | `✓` | 明确完成 |
+| archived | `▪` | 超过 14 天空闲且无恢复信号 |
+
+## 工作原理
+
+1. **`extract.py`** — 增量读取 `~/.claude/projects/**/*.jsonl`,生成结构化摘要。
+2. **`aggregate.py`** — 过滤噪声,按时间排序,输出紧凑 JSON。
+3. **`refresh.sh`** — 将会话数据 + 分类提示词喂给 `claude -p`,生成 `mindmap.json`。
+4. **`render.py`** — 用 Python 标准库渲染彩色 ANSI 树形图(无需 pip install)。
 
 ## 故障排除
 
-- **`/mindmap` 提示"No mindmap cache found"** — 运行 `bash bin/refresh.sh`,
-  或使用 `/mindmap-refresh`。
-- **后台刷新未触发** — 查看日志文件。确认 hook 已安装:
-  `jq .hooks ~/.claude/settings.json`。Hook 仅对安装后新启动的会话生效。
+- **"No mindmap cache found"** — 运行 `mindmap --refresh`。
+- **后台刷新未触发** — 用 `jq .hooks ~/.claude/settings.json` 确认 hook 已安装。
+  Hook 仅对安装后新启动的会话生效。
 - **"Not logged in"** — 运行 `claude /login`。
-- **数据过时** — 使用 `mindmap --refresh`,查看日志了解跳过或失败的原因。
+- **数据过时** — 运行 `mindmap --refresh`,查看日志了解原因。
 
 ## 卸载
 
 ```bash
+rm ~/.claude/commands/mindmap.md ~/.claude/commands/mindmap-refresh.md
+rm ~/.local/bin/mindmap
+
 # macOS
 launchctl unload ~/Library/LaunchAgents/com.claude-code-worktree.plist
 rm ~/Library/LaunchAgents/com.claude-code-worktree.plist
 
-# 全平台
-rm ~/.claude/commands/mindmap.md ~/.claude/commands/mindmap-refresh.md
-rm ~/.local/bin/mindmap
 # 编辑 ~/.claude/settings.json 删除 refresh-bg.sh 相关 hook 条目
 ```
+
+## 许可证
+
+MIT
