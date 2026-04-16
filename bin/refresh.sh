@@ -74,6 +74,19 @@ PY
   exit 0
 fi
 
+# --- Cooldown: skip AI call if last success was recent enough -------------
+# Prevents runaway costs from frequent Stop hook triggers.
+# Override with CLAUDE_WORKTREE_COOLDOWN_SECS or --force (set by mindmap --refresh).
+COOLDOWN_SECS="${CLAUDE_WORKTREE_COOLDOWN_SECS:-900}"
+if [ "${CLAUDE_WORKTREE_FORCE:-}" != "1" ] && [ -f "$OUTPUT_FILE" ]; then
+  output_mtime=$(stat -f %m "$OUTPUT_FILE" 2>/dev/null || stat -c %Y "$OUTPUT_FILE" 2>/dev/null || echo 0)
+  output_age=$(( $(date +%s) - output_mtime ))
+  if [ "$output_age" -lt "$COOLDOWN_SECS" ]; then
+    echo "[refresh] cooldown: last AI refresh was ${output_age}s ago (<${COOLDOWN_SECS}s), skip"
+    exit 0
+  fi
+fi
+
 input_kb=$(( $(wc -c < "$INPUT_FILE") / 1024 ))
 echo "[refresh] input changed, feeding $n_sessions sessions (${input_kb}KB) to claude -p..."
 
@@ -101,9 +114,11 @@ prompt_kb=$(( $(wc -c < "$FULL_PROMPT_FILE") / 1024 ))
 # --disallowedTools keeps the model from spawning tools — we want a pure
 # text-in/text-out classification.
 CLAUDE_TIMEOUT_SECS="${CLAUDE_MINDMAP_TIMEOUT:-600}"
+CLAUDE_MODEL="${CLAUDE_WORKTREE_MODEL:-claude-haiku-4-5-20251001}"
 t_start=$(date +%s)
 if ! perl -e 'alarm shift @ARGV; exec @ARGV' "$CLAUDE_TIMEOUT_SECS" \
     claude -p \
+      --model "$CLAUDE_MODEL" \
       --output-format json \
       --disallowedTools "Bash Edit Write Read Glob Grep" \
       < "$FULL_PROMPT_FILE" \
