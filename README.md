@@ -61,10 +61,13 @@ bash bin/install.sh
 One command does everything: installs slash commands, CLI wrapper, Claude Code
 hooks, and macOS LaunchAgent (if on macOS). No model calls during install.
 
-Then generate your first worktree:
+Then generate your first worktree (first run calls the AI classifier,
+takes ~30–120s):
 
 ```bash
-mindmap --refresh
+mindmap --refresh          # in any terminal (shows progress)
+# or inside Claude Code:
+/mindmap-refresh           # tab-completes, shows model output
 ```
 
 ### Requirements

@@ -10,7 +10,7 @@ set -euo pipefail
 REPO_ROOT="$(cd "$(dirname "$(readlink -f "$0" 2>/dev/null || echo "$0")")/.." && pwd)"
 
 if [ "${1:-}" = "--refresh" ] || [ "${1:-}" = "-r" ]; then
-  CLAUDE_WORKTREE_FORCE=1 bash "$REPO_ROOT/bin/refresh.sh" >/dev/null
+  CLAUDE_WORKTREE_FORCE=1 bash "$REPO_ROOT/bin/refresh.sh" >&2
 fi
 
 exec python3 "$REPO_ROOT/bin/render.py"

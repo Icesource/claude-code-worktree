@@ -49,10 +49,12 @@ bash bin/install.sh
 一条命令完成所有事:安装 slash 命令、CLI 封装、Claude Code hooks 和
 macOS 定时任务(如适用)。安装过程不会触发模型调用。
 
-然后生成你的第一棵工作树:
+然后生成你的第一棵工作树(首次运行调用 AI 分类,约 30-120 秒):
 
 ```bash
-mindmap --refresh
+mindmap --refresh          # 在任意终端(显示进度)
+# 或在 Claude Code 中:
+/mindmap-refresh           # 支持 Tab 补全,显示模型输出
 ```
 
 ### 环境要求
