@@ -98,10 +98,10 @@ else
 fi
 
 echo
-echo "Done! To generate your first worktree, pick one:"
+echo "Done! Open Claude Code and run:"
 echo
-echo "  mindmap --refresh    # in any terminal (shows progress)"
-echo "  /mindmap-refresh     # inside Claude Code (tab-completes, shows model output)"
+echo "  /mindmap-refresh"
 echo
+echo "This generates your first worktree (takes ~30-120s)."
 echo "After that, the tree refreshes automatically in the background."
-echo "View it anytime with:  mindmap"
+echo "View it anytime with:  mindmap  or  /mindmap"
