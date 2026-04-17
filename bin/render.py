@@ -102,7 +102,10 @@ def render(data: dict) -> str:
         out.append(c(DIM, "  (no projects — run bin/refresh.sh)"))
         return "\n".join(out)
 
-    term_width = max(60, min(100, os.get_terminal_size(fallback=(100, 20)).columns)) if sys.stdout.isatty() else 100
+    try:
+        term_width = max(60, min(100, os.get_terminal_size().columns)) if sys.stdout.isatty() else 100
+    except OSError:
+        term_width = 100
 
     live = [p for p in projects if p.get("status") != "archived"]
     archived = [p for p in projects if p.get("status") == "archived"]
