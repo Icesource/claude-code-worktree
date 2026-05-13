@@ -3,6 +3,15 @@
 Planned but not yet implemented. Captured here so the design decisions
 behind them aren't lost between sessions.
 
+For full design docs see [design/](design/).
+
+| Item | Status | Doc |
+|---|---|---|
+| P11.0 cache lock | Proposed (below) | — |
+| P11.1 CLI subcommands | Proposed (below) | — |
+| P11.2 SKILL.md | Proposed (below) | — |
+| P13 two-pass classification | Proposed | [DD-001](design/DD-001-two-pass-classification.md) |
+
 ## P11.0 — Concurrency lock for cache writes
 
 **Why**: Multiple writers can touch the same cache file at once. Today:

@@ -3,7 +3,7 @@
 AI-powered terminal tree of your Claude Code work — auto-classifies sessions
 into projects with progress tracking.
 
-[中文文档](docs/README.zh-CN.md)
+[中文文档](docs/README.zh-CN.md) · [Architecture](docs/ARCHITECTURE.md) · [Troubleshooting](docs/TROUBLESHOOTING.md) · [Roadmap](docs/ROADMAP.md)
 
 ## What it does
 
