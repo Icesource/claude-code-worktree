@@ -41,8 +41,13 @@ Each session summary has:
 1. `task_events` with `completed:` — highest confidence "this got done"
 2. `edited_files` — if a file was written, that work happened
 3. `last_assistant_summary` — usually reflects the most recent state
-4. `recap` — authoritative but may lag on very active sessions
-5. `recent_user_prompts` — what the user is currently focused on
+4. `recent_user_prompts` — what the user is currently focused on; PREFER
+   this over `recap` when the user's latest prompt clearly moves the
+   work past what the recap describes (e.g. recap says "still
+   investigating" but a recent prompt says "let's file the issue" — the
+   prompt wins)
+5. `recap` — useful long-form context but may lag the live conversation
+   by hours; treat as authoritative ONLY when no fresher signal exists
 6. `first_user_prompt` — only the *original* goal, often stale by now
 
 **Crucial**: do NOT list as a `{done: false}` task something that the
@@ -253,6 +258,11 @@ regardless of language.
 - Never invent sessions, initiatives, or tasks that aren't supported by
   the inputs. The combined input is `PRIOR_MINDMAP ∪ INPUT_SESSIONS` —
   anything in EITHER counts as supported.
+- `session_id` values in your `sessions: [...]` output array MUST be the
+  full UUID exactly as it appears in INPUT_SESSIONS. DO NOT truncate
+  them to a prefix. Wrong: `["cbbeb23c"]`. Right:
+  `["cbbeb23c-b6f9-4eb4-926e-7e4046c856d4"]`. The downstream tooling
+  matches sessions by exact full id.
 
 # Self-check before emitting
 

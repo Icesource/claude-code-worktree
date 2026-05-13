@@ -92,11 +92,16 @@ def extract_text_from_message(msg: Any) -> str:
     return ""
 
 
-RECENT_PROMPT_LIMIT = 3
+RECENT_PROMPT_LIMIT = 5
 EDITED_FILES_LIMIT = 20
 TASK_EVENTS_LIMIT = 20
-PROMPT_TRIM = 300
-SUMMARY_TRIM = 400
+PROMPT_TRIM = 400
+# last_assistant_summary previously captured only the first paragraph,
+# which often missed the actual content (when the assistant opened with
+# "Good question, let me think..."). Now we keep up to this many chars
+# from the full text. 1500 fits comfortably in the prompt while capturing
+# meaningful technical reasoning.
+SUMMARY_TRIM = 1500
 # Self-referential detection: refresh.sh feeds classify.md to `claude -p`,
 # which in turn creates a new jsonl. We must skip these so the tool doesn't
 # "see itself" and pollute the classifier input.
@@ -109,12 +114,28 @@ def _is_automation_prompt(text: str) -> bool:
     return any(text.lstrip().startswith(m) for m in AUTOMATION_PROMPT_MARKERS)
 
 
-def _first_paragraph(text: str) -> str:
-    for chunk in text.split("\n\n"):
-        chunk = chunk.strip()
-        if chunk:
-            return chunk
-    return text.strip()
+def _summarize_assistant(text: str, limit: int = SUMMARY_TRIM) -> str:
+    """
+    Return up to `limit` characters of the assistant's text. Tries to
+    end on a sentence boundary so the cut isn't mid-word. Keeps full
+    text when short. Strips empty leading lines.
+
+    Previously this took just the first paragraph; that lost content
+    when the reply opened with a stock preamble like "Good question, let
+    me think about this." The classifier needs the actual reasoning.
+    """
+    text = text.strip()
+    if not text:
+        return ""
+    if len(text) <= limit:
+        return text
+    cut = text[:limit]
+    # Prefer last paragraph break, then sentence terminator, then newline
+    for sep in ("\n\n", "。", ". ", "\n"):
+        idx = cut.rfind(sep)
+        if idx > limit * 0.5:
+            return cut[: idx + len(sep)].strip()
+    return cut.strip()
 
 
 def apply_record(summary: SessionSummary, rec: dict[str, Any]) -> None:
@@ -183,7 +204,7 @@ def apply_record(summary: SessionSummary, rec: dict[str, Any]) -> None:
             if text_parts:
                 combined = "\n\n".join(text_parts).strip()
                 if combined:
-                    summary.last_assistant_summary = _first_paragraph(combined)[:SUMMARY_TRIM]
+                    summary.last_assistant_summary = _summarize_assistant(combined)
     elif t == "system":
         if rec.get("subtype") == "away_summary":
             content = rec.get("content")

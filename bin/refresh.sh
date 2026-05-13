@@ -424,6 +424,46 @@ echo "$new_hash" > "$HASH_FILE"
 # Mark this as a real AI run for the cooldown gate.
 date +%s > "$AI_MARKER"
 
+# Repair any truncated session_ids in AI output. The classifier sometimes
+# emits 8-char prefixes instead of full UUIDs; once that lands in
+# mindmap.json it propagates via PRIOR_MINDMAP. We undo it deterministically
+# by prefix-matching against the aggregate_input (which always has full ids).
+python3 - "$OUTPUT_FILE" "$INPUT_FILE" <<'PY'
+import json, sys
+mm_path, in_path = sys.argv[1], sys.argv[2]
+try:
+    mm = json.load(open(mm_path))
+    agg = json.load(open(in_path))
+except Exception:
+    sys.exit(0)
+full_ids = [e.get("session_id") for e in agg if e.get("session_id")]
+# index by every prefix length we might encounter (4-12 chars)
+prefix_to_full = {}
+for fid in full_ids:
+    for L in (4, 6, 8, 10, 12):
+        prefix_to_full.setdefault(fid[:L], []).append(fid)
+
+def repair(sid):
+    if not sid: return sid
+    if len(sid) >= 30: return sid  # already full UUID
+    cands = prefix_to_full.get(sid, [])
+    if len(cands) == 1: return cands[0]
+    return sid  # ambiguous or no match — leave as-is
+
+repaired = 0
+for ws in (mm.get("workspaces") or []):
+    for init in (ws.get("initiatives") or []):
+        new = []
+        for s in (init.get("sessions") or []):
+            fixed = repair(s)
+            if fixed != s: repaired += 1
+            new.append(fixed)
+        init["sessions"] = new
+if repaired:
+    json.dump(mm, open(mm_path, "w"), indent=2, ensure_ascii=False)
+    print(f"[refresh] repaired {repaired} truncated session_ids")
+PY
+
 # Regenerate HTML view alongside the JSON so external viewers stay fresh.
 # Non-fatal: if HTML generation fails, the JSON refresh still counts as success.
 python3 "$REPO_ROOT/bin/render-html.py" >/dev/null 2>&1 || true
