@@ -2,14 +2,69 @@
 # One-step installer for claude-code-worktree.
 # Sets up: slash commands, shell wrapper, Claude Code hooks, and periodic
 # background refresh (macOS only). Does NOT trigger a model call.
+#
+# Usage: bash bin/install.sh [--lang zh-CN|en]
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 HOME_DIR="$HOME"
 OS="$(uname)"
 
-echo "Installing claude-code-worktree..."
+# --- Parse args --------------------------------------------------------------
+LANG_CHOICE=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --lang)
+      LANG_CHOICE="$2"
+      shift 2
+      ;;
+    --lang=*)
+      LANG_CHOICE="${1#--lang=}"
+      shift
+      ;;
+    -h|--help)
+      echo "Usage: bash bin/install.sh [--lang zh-CN|en]"
+      echo "  --lang   Output language for mindmap content (default: zh-CN)"
+      exit 0
+      ;;
+    *)
+      echo "Unknown argument: $1" >&2
+      exit 1
+      ;;
+  esac
+done
+
+case "${LANG_CHOICE:-zh-CN}" in
+  zh-CN|en) ;;
+  *)
+    echo "Unsupported --lang: $LANG_CHOICE (use zh-CN or en)" >&2
+    exit 1
+    ;;
+esac
+LANG_CHOICE="${LANG_CHOICE:-zh-CN}"
+
+echo "Installing claude-code-worktree (lang=$LANG_CHOICE)..."
 echo
+
+# --- 0. Write config ---------------------------------------------------------
+CACHE_DIR="$REPO_ROOT/cache"
+CONFIG_FILE="$CACHE_DIR/config.json"
+mkdir -p "$CACHE_DIR"
+python3 - "$CONFIG_FILE" "$LANG_CHOICE" <<'PY'
+import json, os, sys
+path, lang = sys.argv[1], sys.argv[2]
+data = {}
+if os.path.exists(path):
+    try:
+        data = json.load(open(path))
+    except Exception:
+        data = {}
+data["lang"] = lang
+data.setdefault("version", 1)
+json.dump(data, open(path, "w"), indent=2, ensure_ascii=False)
+PY
+echo "[0/4] wrote config: $CONFIG_FILE (lang=$LANG_CHOICE)"
+
 
 # --- 1. Slash commands -------------------------------------------------------
 # Commands use __REPO__ as a placeholder; we substitute and copy (not symlink)
@@ -98,10 +153,21 @@ else
 fi
 
 echo
-echo "Done! Open Claude Code and run:"
-echo
-echo "  /mindmap-refresh"
-echo
-echo "This generates your first worktree (takes ~30-120s)."
-echo "After that, the tree refreshes automatically in the background."
-echo "View it anytime with:  mindmap  or  /mindmap"
+if [ "$LANG_CHOICE" = "zh-CN" ]; then
+  echo "完成！打开 Claude Code 后运行："
+  echo
+  echo "  /mindmap-refresh"
+  echo
+  echo "首次生成需 ~30-120 秒，之后会在后台自动刷新。"
+  echo "随时查看：mindmap 或 /mindmap"
+  echo "切换语言：bash bin/install.sh --lang en"
+else
+  echo "Done! Open Claude Code and run:"
+  echo
+  echo "  /mindmap-refresh"
+  echo
+  echo "This generates your first worktree (takes ~30-120s)."
+  echo "After that, the tree refreshes automatically in the background."
+  echo "View it anytime with:  mindmap  or  /mindmap"
+  echo "Switch language:  bash bin/install.sh --lang zh-CN"
+fi

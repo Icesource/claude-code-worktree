@@ -17,6 +17,14 @@ OUTPUT_FILE="$CACHE_DIR/mindmap.json"
 INPUT_FILE="$CACHE_DIR/aggregate_input.json"
 HASH_FILE="$CACHE_DIR/last_input.sha256"
 LOCK_DIR="$CACHE_DIR/refresh.lock.d"
+# Tracks the epoch of the LAST SUCCESSFUL AI call. The cooldown gate
+# reads this — using OUTPUT_FILE mtime instead causes a subtle bug:
+# apply-overrides legitimately writes to OUTPUT_FILE, which would falsely
+# "reset" the cooldown clock and starve AI runs forever.
+AI_MARKER="$CACHE_DIR/last_ai_run.epoch"
+
+# Stamp every invocation so the log shows exactly what fired when.
+echo "[hook] $(date -Iseconds) refresh-bg fired (pid=$$)"
 
 mkdir -p "$CACHE_DIR"
 
@@ -40,6 +48,106 @@ if ! mkdir "$LOCK_DIR" 2>/dev/null; then
 fi
 trap 'rm -rf "$LOCK_DIR"' EXIT
 
+# --- Apply user edits from cache/user_overrides.json + cache/archive/ -----
+# This bakes user-marked task done/undone, deleted tasks, and archived
+# initiatives into mindmap.json BEFORE classification, so the AI sees
+# the user's intent in PRIOR_MINDMAP and respects it (done-monotone rule).
+echo "[refresh] applying user overrides + archive removals..."
+python3 - "$CACHE_DIR" <<'PY'
+import json, os, pathlib, sys
+cache = pathlib.Path(sys.argv[1])
+mm_path = cache / "mindmap.json"
+ov_path = cache / "user_overrides.json"
+arc_dir = cache / "archive"
+del_path = cache / "deleted_ids.json"
+
+if not mm_path.exists():
+    sys.exit(0)
+
+try:
+    mm = json.load(open(mm_path))
+except Exception:
+    sys.exit(0)
+
+if mm.get("schema_version") != 2:
+    sys.exit(0)  # legacy schema — skip overrides
+
+changed = False
+
+# 1) Apply user_overrides.json
+if ov_path.exists():
+    try:
+        ov = json.load(open(ov_path))
+    except Exception:
+        ov = {}
+    task_toggles = ov.get("task_toggles") or []
+    deleted_tasks = ov.get("deleted_tasks") or []
+    if task_toggles or deleted_tasks:
+        toggle_idx = {(tt["init_id"], tt["task_title"]): tt["done"] for tt in task_toggles}
+        del_set = {(dt["init_id"], dt["task_title"]) for dt in deleted_tasks}
+        applied_tog = 0
+        removed_tasks = 0
+        for ws in mm.get("workspaces", []):
+            for init in (ws.get("initiatives") or []):
+                iid = init.get("id")
+                new_tasks = []
+                for t in (init.get("tasks") or []):
+                    title = t.get("title")
+                    if (iid, title) in del_set:
+                        removed_tasks += 1
+                        continue
+                    if (iid, title) in toggle_idx:
+                        if t.get("done") != toggle_idx[(iid, title)]:
+                            t["done"] = toggle_idx[(iid, title)]
+                            applied_tog += 1
+                    new_tasks.append(t)
+                init["tasks"] = new_tasks
+        if applied_tog or removed_tasks:
+            print(f"[refresh]   applied {applied_tog} task toggles, removed {removed_tasks} deleted tasks")
+            changed = True
+        # Clear the file: edits are now baked into mindmap.json
+        json.dump({"version": 1, "task_toggles": [], "deleted_tasks": [], "consumed_at": ov.get("updated_at")},
+                  open(ov_path, "w"), indent=2, ensure_ascii=False)
+
+# 2) Remove archived initiatives from mindmap.json (data preserved in cache/archive/)
+if arc_dir.is_dir():
+    archived_ids = set()
+    for f in arc_dir.glob("*/*.json"):
+        archived_ids.add(f.stem)
+    if archived_ids:
+        removed = 0
+        for ws in mm.get("workspaces", []):
+            before = len(ws.get("initiatives") or [])
+            ws["initiatives"] = [i for i in (ws.get("initiatives") or []) if i.get("id") not in archived_ids]
+            removed += before - len(ws.get("initiatives") or [])
+        # Drop workspaces left with no initiatives
+        mm["workspaces"] = [w for w in mm.get("workspaces", []) if (w.get("initiatives") or [])]
+        if removed:
+            print(f"[refresh]   moved {removed} initiatives to archive (excluded from mindmap.json)")
+            changed = True
+
+# 3) Apply deleted_ids tombstones to mindmap.json (also exclude from future)
+if del_path.exists():
+    try:
+        del_list = json.load(open(del_path)).get("initiatives") or []
+    except Exception:
+        del_list = []
+    deleted_set = {x.get("id") for x in del_list if x.get("id")}
+    if deleted_set:
+        removed = 0
+        for ws in mm.get("workspaces", []):
+            before = len(ws.get("initiatives") or [])
+            ws["initiatives"] = [i for i in (ws.get("initiatives") or []) if i.get("id") not in deleted_set]
+            removed += before - len(ws.get("initiatives") or [])
+        mm["workspaces"] = [w for w in mm.get("workspaces", []) if (w.get("initiatives") or [])]
+        if removed:
+            print(f"[refresh]   removed {removed} user-deleted initiatives")
+            changed = True
+
+if changed:
+    json.dump(mm, open(mm_path, "w"), indent=2, ensure_ascii=False)
+PY
+
 # --- Pipeline --------------------------------------------------------------
 echo "[refresh] $(date -Iseconds) extracting sessions..."
 python3 "$REPO_ROOT/bin/extract.py"
@@ -50,7 +158,7 @@ python3 "$REPO_ROOT/bin/aggregate.py" > "$INPUT_FILE"
 n_sessions=$(python3 -c "import json; print(len(json.load(open('$INPUT_FILE'))))")
 
 if [ "$n_sessions" -eq 0 ]; then
-  echo '{"generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","projects":[]}' > "$OUTPUT_FILE"
+  echo '{"schema_version":2,"generated_at":"'"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'","workspaces":[]}' > "$OUTPUT_FILE"
   echo "[refresh] no sessions, wrote empty mindmap"
   exit 0
 fi
@@ -70,25 +178,85 @@ data = json.load(open(path))
 data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 json.dump(data, open(path, "w"), indent=2, ensure_ascii=False)
 PY
+  python3 "$REPO_ROOT/bin/render-html.py" >/dev/null 2>&1 || true
+python3 "$REPO_ROOT/bin/render-tree.py" >/dev/null 2>&1 || true
   echo "[refresh] input unchanged ($new_hash), reused cached mindmap ($n_sessions sessions)"
   exit 0
 fi
 
-# --- Cooldown: skip AI call if last success was recent enough -------------
+# --- Cooldown: skip AI call if a real AI call ran recently ---------------
 # Prevents runaway costs from frequent Stop hook triggers.
 # Override with CLAUDE_WORKTREE_COOLDOWN_SECS or --force (set by mindmap --refresh).
-COOLDOWN_SECS="${CLAUDE_WORKTREE_COOLDOWN_SECS:-900}"
-if [ "${CLAUDE_WORKTREE_FORCE:-}" != "1" ] && [ -f "$OUTPUT_FILE" ]; then
-  output_mtime=$(stat -f %m "$OUTPUT_FILE" 2>/dev/null || stat -c %Y "$OUTPUT_FILE" 2>/dev/null || echo 0)
-  output_age=$(( $(date +%s) - output_mtime ))
-  if [ "$output_age" -lt "$COOLDOWN_SECS" ]; then
-    echo "[refresh] cooldown: last AI refresh was ${output_age}s ago (<${COOLDOWN_SECS}s), skip"
+#
+# Important: we use a DEDICATED marker file (last_ai_run.epoch) instead of
+# OUTPUT_FILE mtime, because OUTPUT_FILE is also written by the
+# apply-overrides phase. Using mtime would let apply-overrides "reset" the
+# cooldown clock, starving AI runs.
+COOLDOWN_SECS="${CLAUDE_WORKTREE_COOLDOWN_SECS:-300}"
+if [ "${CLAUDE_WORKTREE_FORCE:-}" != "1" ] && [ -f "$AI_MARKER" ]; then
+  last_ai_epoch=$(cat "$AI_MARKER" 2>/dev/null | tr -dc 0-9 || echo 0)
+  last_ai_epoch="${last_ai_epoch:-0}"
+  ai_age=$(( $(date +%s) - last_ai_epoch ))
+  if [ "$ai_age" -lt "$COOLDOWN_SECS" ]; then
+    remain=$(( COOLDOWN_SECS - ai_age ))
+    echo "[refresh] SKIP-COOLDOWN: last AI run was ${ai_age}s ago (<${COOLDOWN_SECS}s); next allowed in ${remain}s"
     exit 0
   fi
+  echo "[refresh] cooldown cleared (last AI run ${ai_age}s ago, >=${COOLDOWN_SECS}s)"
 fi
 
 input_kb=$(( $(wc -c < "$INPUT_FILE") / 1024 ))
 echo "[refresh] input changed, feeding $n_sessions sessions (${input_kb}KB) to claude -p..."
+
+# Resolve output language: env var > config file > default zh-CN.
+OUTPUT_LANG="${CLAUDE_WORKTREE_LANG:-}"
+if [ -z "$OUTPUT_LANG" ] && [ -f "$CACHE_DIR/config.json" ]; then
+  OUTPUT_LANG=$(python3 -c "import json; print(json.load(open('$CACHE_DIR/config.json')).get('lang',''))" 2>/dev/null || echo "")
+fi
+OUTPUT_LANG="${OUTPUT_LANG:-zh-CN}"
+
+# Resolve prior mindmap: feed back v2 output as continuity baseline.
+# Skip for v1 (legacy schema), missing file, or empty workspaces.
+PRIOR_BLOCK=""
+if [ -f "$OUTPUT_FILE" ]; then
+  PRIOR_BLOCK=$(python3 - "$OUTPUT_FILE" <<'PY'
+import json, sys
+try:
+    d = json.load(open(sys.argv[1]))
+except Exception:
+    sys.exit(0)
+if d.get("schema_version") != 2 or not d.get("workspaces"):
+    sys.exit(0)
+# Compact the prior to keep prompt small; drop generated_at and full sessions.
+slim = {
+    "schema_version": d.get("schema_version"),
+    "workspaces": [
+        {
+            "name": w.get("name"),
+            "cwd": w.get("cwd"),
+            "last_activity_at": w.get("last_activity_at"),
+            "initiatives": [
+                {
+                    "id": i.get("id"),
+                    "name": i.get("name"),
+                    "status": i.get("status"),
+                    "summary": i.get("summary"),
+                    "progress": i.get("progress"),
+                    "tasks": i.get("tasks", []),
+                    "sessions": i.get("sessions", []),
+                    "linked_cwds": i.get("linked_cwds", []),
+                    "last_activity_at": i.get("last_activity_at"),
+                }
+                for i in (w.get("initiatives") or [])
+            ],
+        }
+        for w in d.get("workspaces", [])
+    ],
+}
+print(json.dumps(slim, ensure_ascii=False))
+PY
+  )
+fi
 
 # Build the full prompt: instructions + input data.
 NOW_ISO=$(date -u +%Y-%m-%dT%H:%M:%SZ)
@@ -96,10 +264,39 @@ FULL_PROMPT_FILE="$CACHE_DIR/_prompt.txt"
 {
   cat "$PROMPT_FILE"
   echo
+  echo "OUTPUT_LANG: $OUTPUT_LANG"
+  echo
   echo "CURRENT_TIME: $NOW_ISO"
   echo "(Use this as the reference point when computing session age.)"
   echo
-  echo "INPUT SESSIONS:"
+  if [ -n "$PRIOR_BLOCK" ]; then
+    echo "PRIOR_MINDMAP:"
+    echo "$PRIOR_BLOCK"
+    echo
+  else
+    echo "PRIOR_MINDMAP: (none — cold start, build fresh from sessions)"
+    echo
+  fi
+  # Inject tombstones if any. AI must NEVER include these IDs in output.
+  if [ -f "$CACHE_DIR/deleted_ids.json" ]; then
+    DEL_BLOCK=$(python3 -c "
+import json, sys
+try:
+    d = json.load(open('$CACHE_DIR/deleted_ids.json'))
+    ids = [x.get('id') for x in (d.get('initiatives') or []) if x.get('id')]
+    if ids:
+        print(json.dumps({'deleted_initiative_ids': ids}, ensure_ascii=False))
+except Exception:
+    pass
+" 2>/dev/null)
+    if [ -n "$DEL_BLOCK" ]; then
+      echo "DELETED_IDS:"
+      echo "$DEL_BLOCK"
+      echo "(These IDs are user-deleted tombstones. Do NOT include them in output even if INPUT_SESSIONS has evidence.)"
+      echo
+    fi
+  fi
+  echo "INPUT_SESSIONS:"
   cat "$INPUT_FILE"
 } > "$FULL_PROMPT_FILE"
 
@@ -132,7 +329,8 @@ fi
 t_elapsed=$(( $(date +%s) - t_start ))
 
 # Extract the text result and usage stats from JSON envelope, then parse
-# the mindmap JSON from the model's text output.
+# the mindmap JSON from the model's text output. Also produce a diff
+# against the prior mindmap so the log clearly shows what AI changed.
 python3 - "$CACHE_DIR/_raw_output.json" "$OUTPUT_FILE" "$prompt_kb" "$t_elapsed" <<'PY'
 import json, re, sys
 
@@ -149,6 +347,21 @@ cost = envelope.get("total_cost_usd", 0)
 print(f"[refresh] usage: in={in_tok} (+{cache_create} cache-create) out={out_tok} "
       f"cost=${cost:.4f} prompt={prompt_kb}KB elapsed={elapsed}s")
 
+# --- Snapshot prior for diff (before overwrite) -----------------------------
+prior_index = {}  # id -> {name, status, task_count}
+try:
+    prior = json.load(open(sys.argv[2]))
+    for ws in (prior.get("workspaces") or []):
+        for i in (ws.get("initiatives") or []):
+            prior_index[i.get("id")] = {
+                "name": i.get("name"),
+                "status": i.get("status"),
+                "tasks": len(i.get("tasks") or []),
+                "done": sum(1 for t in (i.get("tasks") or []) if t.get("done")),
+            }
+except Exception:
+    prior_index = {}
+
 # --- Extract mindmap JSON from model text -----------------------------------
 raw = (envelope.get("result") or "").strip()
 m = re.search(r"```(?:json)?\s*(\{.*\})\s*```", raw, re.DOTALL)
@@ -162,8 +375,56 @@ data = json.loads(raw)
 from datetime import datetime, timezone
 data["generated_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 json.dump(data, open(sys.argv[2], "w"), indent=2, ensure_ascii=False)
-print(f"[refresh] wrote {sys.argv[2]} with {len(data.get('projects', []))} projects")
+
+# --- Build the diff ---------------------------------------------------------
+new_index = {}
+for ws in (data.get("workspaces") or []):
+    for i in (ws.get("initiatives") or []):
+        new_index[i.get("id")] = {
+            "name": i.get("name"),
+            "status": i.get("status"),
+            "tasks": len(i.get("tasks") or []),
+            "done": sum(1 for t in (i.get("tasks") or []) if t.get("done")),
+        }
+
+added = sorted(set(new_index) - set(prior_index))
+removed = sorted(set(prior_index) - set(new_index))
+status_changed = [i for i in (set(new_index) & set(prior_index))
+                  if new_index[i]["status"] != prior_index[i]["status"]]
+task_progress = [i for i in (set(new_index) & set(prior_index))
+                 if new_index[i]["done"] != prior_index[i]["done"]
+                 or new_index[i]["tasks"] != prior_index[i]["tasks"]]
+
+if "workspaces" in data:
+    ws_n = len(data.get("workspaces", []))
+    init_n = len(new_index)
+    print(f"[refresh] wrote {sys.argv[2]}: {ws_n} workspaces, {init_n} initiatives")
+else:
+    print(f"[refresh] wrote {sys.argv[2]} with {len(data.get('projects', []))} projects (legacy)")
+
+if added or removed or status_changed or task_progress:
+    print(f"[refresh] DIFF vs prior:")
+    if added:
+        for i in added:
+            print(f"  + NEW initiative: {i} — {new_index[i]['name']}")
+    if removed:
+        for i in removed:
+            print(f"  - removed initiative: {i} — {prior_index[i]['name']}")
+    for i in status_changed:
+        print(f"  ~ status change: {i} {prior_index[i]['status']} → {new_index[i]['status']}  ({new_index[i]['name']})")
+    for i in task_progress:
+        po, pn = prior_index[i], new_index[i]
+        print(f"  ~ task progress: {i} tasks {po['tasks']}→{pn['tasks']}, done {po['done']}→{pn['done']}  ({pn['name']})")
+else:
+    print(f"[refresh] DIFF vs prior: no structural change (only timestamps/wording may have moved)")
 PY
 
 # Record the hash only after a fully successful claude -p pass.
 echo "$new_hash" > "$HASH_FILE"
+# Mark this as a real AI run for the cooldown gate.
+date +%s > "$AI_MARKER"
+
+# Regenerate HTML view alongside the JSON so external viewers stay fresh.
+# Non-fatal: if HTML generation fails, the JSON refresh still counts as success.
+python3 "$REPO_ROOT/bin/render-html.py" >/dev/null 2>&1 || true
+python3 "$REPO_ROOT/bin/render-tree.py" >/dev/null 2>&1 || true

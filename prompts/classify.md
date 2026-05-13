@@ -1,7 +1,24 @@
 You are analyzing a developer's Claude Code session history to produce a
-mindmap of their recent work.
+hierarchical mindmap of their recent work.
 
-You will be given a JSON array of session summaries. Each entry has:
+You will receive **up to three inputs**:
+
+1. **PRIOR_MINDMAP** (optional) — the previous mindmap output. Use it as
+   your baseline; preserve continuity. Details in the "Continuity rules"
+   section below. May be absent on first run — then build fresh.
+
+2. **DELETED_IDS** (optional) — a JSON object with key
+   `deleted_initiative_ids`. These are initiative IDs the user has
+   explicitly deleted. They MUST NOT appear in your output, even if
+   INPUT_SESSIONS contains fresh evidence for them. The user wants them
+   gone; respect that. (If you see evidence for a deleted ID, you may
+   create a NEW initiative under a different `id` for that work — but
+   the deleted ID itself stays out.)
+
+3. **INPUT_SESSIONS** — a JSON array of session summaries (described
+   next), representing recent work to classify.
+
+Each session summary has:
 - `session_id`: unique session identifier
 - `cwd`: working directory of the session
 - `started_at` / `last_activity_at`: timestamps
@@ -32,63 +49,219 @@ You will be given a JSON array of session summaries. Each entry has:
 `edited_files`, `last_assistant_summary`, or `task_events` fields clearly
 show was completed. Prefer the most recent signal when they conflict.
 
-Your job:
+# Continuity rules (when PRIOR_MINDMAP is present)
 
-1. Group sessions into **projects**. A project usually corresponds to a `cwd`,
-   but merge cwds that clearly belong to the same logical effort (e.g. a
-   frontend and backend repo working toward one feature). Split a single cwd
-   into multiple projects if the sessions cover distinct goals.
+**Treat PRIOR_MINDMAP as your starting state and EDIT it in place** based
+on INPUT_SESSIONS. Do NOT rebuild from scratch. This is the most
+important rule in this prompt — getting it wrong makes every refresh
+visually shuffle the user's history.
 
-2. For each project produce:
-   - `name`: short human-readable name (prefer the repo/folder name)
-   - `cwd`: primary working directory (or a list if merged)
-   - `status`: one of `active`, `paused`, `done`, `archived`. Rules:
-     * `active` — last activity within the past 3 days, work clearly ongoing
-     * `paused` — last activity 3–14 days ago, or longer but with a clear
-       "resume later" signal (open todos, unfinished MRs, waiting on someone)
-     * `done` — explicitly finished: shipped, merged, report delivered, or
-       recap/prompt indicates completion
-     * `archived` — last activity >14 days ago AND no clear resumption signal.
-       Also use this for one-off exploratory sessions, failed experiments,
-       throwaway debugging, or anything unlikely to have ongoing value.
-     When in doubt between `paused` and `archived`, check whether the work
-     produced durable artifacts (merged code, filed issues) — if yes,
-     `paused`; if no, `archived`.
-   - `summary`: 1-2 sentences describing what the project is about
-   - `progress`: 1-2 sentences on the latest state / where things stand
-   - `tasks`: up to 6 concrete items with `{title, done}`. Prefer items
-     explicitly mentioned as done/todo in recaps; otherwise infer from prompts.
-   - `sessions`: list of contributing session_ids
-   - `last_activity_at`: most recent timestamp among its sessions
+## Identity preservation
 
-3. Sort projects by `last_activity_at` descending.
+For each prior initiative that still corresponds to ongoing or recent
+work, **reuse its `id` and `name` verbatim**. Match by conceptual
+identity, not exact wording. The `id` is the stable handle; never mint a
+new id for the same effort.
 
-4. Sort `archived` projects to the end of the list, regardless of their
-   timestamp. Within each status group, sort by `last_activity_at` desc.
+Acceptable name change: only if prior name is clearly wrong or
+misleading given new evidence. When you do change a name, keep the `id`.
 
-5. Output **strict JSON only** matching this shape, no prose, no code fences:
+For each prior task, **preserve its title verbatim** unless the title is
+factually inaccurate. Minor wording polish is NOT a reason to rewrite a
+task — that creates visual churn.
+
+## Task evolution
+
+- Prior tasks with `done: true` MUST stay `done: true`. Work that happened
+  doesn't un-happen.
+- Prior tasks with `done: false`: check INPUT_SESSIONS for completion
+  evidence (task_events `completed:`, edited_files, recap, summary). If
+  completed → flip to `done: true`. Otherwise keep as `done: false`.
+- Add NEW tasks only when INPUT_SESSIONS surfaces new concrete work not
+  already covered by a prior task.
+- Do NOT delete prior tasks. They are history.
+
+## Initiative lifecycle
+
+- Prior initiative with new activity in INPUT_SESSIONS → update its
+  `progress`, `status`, `tasks`, `last_activity_at` based on new evidence.
+- Prior initiative with NO new sessions in INPUT_SESSIONS → keep it.
+  Apply natural status decay based on `last_activity_at`:
+  * still within 3 days → keep `active`
+  * 3–14 days old → demote to `paused`
+  * >14 days old AND status was already `paused` or has no resume
+    signal → demote to `archived`
+  * `done` stays `done`
+- An initiative may SPLIT: if prior had one initiative and new evidence
+  shows two clearly distinct narratives, keep the prior `id`/`name` for
+  the dominant strand and create a new initiative for the new strand
+  (with a new `id`).
+- An initiative may MERGE only when prior had two and new evidence
+  clearly unifies them — rare, do this only when obvious.
+
+## Workspace structure
+
+- Reuse prior workspace `name` and `cwd` mappings. Don't reshuffle
+  workspaces between refreshes unless an initiative clearly migrated
+  (e.g. work moved to a new repo).
+
+## Cold start
+
+If PRIOR_MINDMAP is absent, empty, or uses the legacy v1 schema (has
+`projects` not `workspaces`), ignore it and classify INPUT_SESSIONS from
+scratch.
+
+# Your job
+
+Produce a **three-level hierarchy**:
+
+```
+workspace                  (top — usually a repo/codebase)
+  └── initiative           (mid — a coherent piece of work inside it)
+        └── task           (leaf — concrete, checkable item)
+```
+
+## Step 1: Group sessions into INITIATIVES
+
+An **initiative** is a coherent, single-narrative piece of work — e.g.
+"ChangeFree service refactor", "App doc version_no migration", "NCS
+gateway auth integration". Usually multiple sessions share an initiative.
+
+Rules:
+- One `cwd` may contain MULTIPLE initiatives (split if the sessions cover
+  distinct goals — e.g. `hsfops` may have both "ChangeFree refactor" and
+  "App doc iteration" in parallel).
+- An initiative MAY span multiple `cwd`s when sessions in different repos
+  clearly serve one narrative (e.g. a feature touching frontend + backend
+  + SKILL files all for the same feature).
+
+## Step 2: Group initiatives into WORKSPACES
+
+A **workspace** is the conceptual home of related work — usually a repo
+folder name (e.g. `hsfops`, `mw-cli`, `hsf-doc-generator`), but it can
+also be a logical area (e.g. `skills`, `claude-code-tooling`).
+
+Rules:
+- For initiatives confined to a single cwd: workspace = that cwd's folder
+  name.
+- For initiatives spanning multiple cwds: choose the **PRIMARY OWNER
+  WORKSPACE** by *semantic ownership*, not activity volume. Ask:
+  "Which area is this work fundamentally *about*?"
+  - Example: a Claude Skill development effort that touches frontend,
+    backend, and SKILL definition files belongs under the `skills`
+    workspace because that's its conceptual home — even if more commits
+    landed in the frontend repo.
+  - Example: a feature that adds an API to backend and consumes it in
+    frontend, where the feature *is* an API capability, belongs under
+    the backend workspace.
+- Record other involved cwds in `linked_cwds` on the initiative.
+
+## Step 3: Per-initiative fields
+
+For each initiative produce:
+- `id`: stable slug like `hsfops-changefree-refactor` (lowercase, hyphens)
+- `name`: short human-readable name (in the OUTPUT_LANG below)
+- `status`: one of `active`, `paused`, `done`, `archived`. Rules:
+  * `active` — last activity within the past 3 days, work clearly ongoing
+  * `paused` — last activity 3–14 days ago, or longer but with a clear
+    "resume later" signal (open todos, unfinished MRs, waiting on someone)
+  * `done` — explicitly finished: shipped, merged, report delivered, or
+    recap/prompt indicates completion
+  * `archived` — last activity >14 days ago AND no clear resumption signal.
+    Also use this for one-off exploratory sessions, failed experiments,
+    throwaway debugging, or anything unlikely to have ongoing value.
+  When in doubt between `paused` and `archived`, check whether the work
+  produced durable artifacts (merged code, filed issues) — if yes,
+  `paused`; if no, `archived`.
+- `summary`: 1-2 sentences describing what the initiative is about
+- `progress`: 1-2 sentences on the latest state / where things stand
+- `tasks`: concrete items with `{title, done}`. **Be GENEROUS — list every
+  distinct task you can substantiate** from recaps, task_events,
+  edited_files, and prompts. No artificial cap. If 12 distinct tasks are
+  supported by evidence, list 12. The downstream UI handles folding.
+- `sessions`: list of contributing session_ids
+- `linked_cwds`: list of *secondary* cwds when the initiative spans repos
+  (omit or empty array if single-cwd)
+- `last_activity_at`: most recent timestamp among its sessions
+
+## Step 4: Per-workspace fields
+
+For each workspace produce:
+- `name`: workspace name (short, often a folder name)
+- `cwd`: the primary/home cwd of this workspace
+- `last_activity_at`: max `last_activity_at` across its initiatives
+- `initiatives`: list of initiatives, sorted by `last_activity_at` desc
+
+Sort workspaces by `last_activity_at` descending. Within each workspace,
+sort initiatives by `last_activity_at` desc.
+
+# Output format
+
+Output **strict JSON only** matching this shape — no prose, no code fences:
 
 ```
 {
+  "schema_version": 2,
   "generated_at": "<ISO-8601 UTC>",
-  "projects": [
+  "workspaces": [
     {
       "name": "...",
       "cwd": "...",
-      "status": "active|paused|done|archived",
-      "summary": "...",
-      "progress": "...",
-      "tasks": [{"title": "...", "done": true|false}],
-      "sessions": ["..."],
-      "last_activity_at": "..."
+      "last_activity_at": "...",
+      "initiatives": [
+        {
+          "id": "...",
+          "name": "...",
+          "status": "active|paused|done|archived",
+          "summary": "...",
+          "progress": "...",
+          "tasks": [{"title": "...", "done": true|false}],
+          "sessions": ["..."],
+          "linked_cwds": [],
+          "last_activity_at": "..."
+        }
+      ]
     }
   ]
 }
 ```
 
-Rules:
+# Language
+
+`OUTPUT_LANG` will be substituted before the prompt runs. The values of
+the following fields MUST be written in that language:
+`workspaces[].name`, `initiatives[].name`, `initiatives[].summary`,
+`initiatives[].progress`, `initiatives[].tasks[].title`.
+
+If `OUTPUT_LANG` is `zh-CN`: write those fields in Simplified Chinese,
+natural and concise (this is a developer's status report, not a translation
+exercise). Technical terms (HSF, OAuth, RBAC, SDK, CR, MR, repo, branch,
+schema, etc.) may stay in English when that's the natural usage.
+
+If `OUTPUT_LANG` is `en`: write those fields in English.
+
+Other fields (`id`, `cwd`, `status`, `session_id`, timestamps) stay as-is
+regardless of language.
+
+# Rules
+
 - Prefer `recap` over `first_user_prompt` when both exist — recaps are
   authoritative.
 - Be concise. Summaries should read like a status report, not a transcript.
-- If the input is empty, output `{"generated_at": "...", "projects": []}`.
-- Never invent sessions or tasks that aren't supported by the input.
+- If both inputs are empty, output
+  `{"schema_version": 2, "generated_at": "...", "workspaces": []}`.
+- Never invent sessions, initiatives, or tasks that aren't supported by
+  the inputs. The combined input is `PRIOR_MINDMAP ∪ INPUT_SESSIONS` —
+  anything in EITHER counts as supported.
+
+# Self-check before emitting
+
+Before you emit JSON, mentally diff against PRIOR_MINDMAP:
+- Every prior initiative `id` should appear in your output (possibly with
+  updated status / tasks / progress). If you dropped one, you'd better
+  have a strong reason — and the reason cannot be "no new sessions for
+  it" (use status decay instead).
+- Every prior task should appear under its initiative, with the same
+  title and a `done` value that is monotone (false→true is allowed,
+  true→false is FORBIDDEN).
+- New tasks/initiatives should have justification in INPUT_SESSIONS.
