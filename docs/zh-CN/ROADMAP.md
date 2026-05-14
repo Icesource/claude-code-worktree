@@ -11,7 +11,8 @@
 | P11.0 cache 并发锁 | Proposed（下方） | — |
 | P11.1 CLI 子命令 | Proposed（下方） | — |
 | P11.2 SKILL.md | Proposed（下方） | — |
-| P13 AI Pipeline 重设计 | Proposed | [DD-002](design/DD-002-ai-pipeline-redesign.md) |
+| P14 AI Pipeline 重设计 | 已实施 | [DD-002](design/DD-002-ai-pipeline-redesign.md) |
+| P15 卡片详情 + artifacts | Proposed | [DD-003](design/DD-003-card-detail-and-artifacts.md) |
 | P13 (历史) 两段式分类 | Superseded | [DD-001](design/DD-001-two-pass-classification.md) |
 
 ## P11.0 — cache 写入的并发锁

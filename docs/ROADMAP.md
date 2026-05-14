@@ -12,7 +12,8 @@ For full design docs see [design/](design/).
 | P11.0 cache lock | Proposed (below) | — |
 | P11.1 CLI subcommands | Proposed (below) | — |
 | P11.2 SKILL.md | Proposed (below) | — |
-| P13 AI Pipeline redesign | Proposed | [DD-002](design/DD-002-ai-pipeline-redesign.md) |
+| P14 AI Pipeline redesign | Implemented | [DD-002](design/DD-002-ai-pipeline-redesign.md) |
+| P15 Card detail + artifacts | Proposed | [DD-003](design/DD-003-card-detail-and-artifacts.md) |
 | P13 (historical) two-pass classification | Superseded | [DD-001](design/DD-001-two-pass-classification.md) |
 
 ## P11.0 — Concurrency lock for cache writes

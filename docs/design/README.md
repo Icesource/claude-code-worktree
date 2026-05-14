@@ -11,7 +11,8 @@ for when to write one.
 | ID | Title | Status |
 |---|---|---|
 | [DD-001](DD-001-two-pass-classification.md) | Two-pass classification: per-session AI summaries replace hard compression | Superseded by DD-002 |
-| [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline redesign (three layers + hot/cold + dirty tracking + coalesce) | **Proposed** |
+| [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline redesign (three layers + hot/cold + dirty tracking + coalesce) | Implemented (P14) |
+| [DD-003](DD-003-card-detail-and-artifacts.md) | Card detail modal: artifact extraction (CR/issue/branch) + blocker tracking | **Proposed** |
 
 ## Template
 

@@ -10,7 +10,8 @@
 | ID | 标题 | 状态 |
 |---|---|---|
 | [DD-001](DD-001-two-pass-classification.md) | 两段式分类：用每 session AI 摘要替代硬压缩 | Superseded by DD-002 |
-| [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline 重设计（三层 + 冷热 + dirty tracking + coalesce） | **Proposed** |
+| [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline 重设计（三层 + 冷热 + dirty tracking + coalesce） | 已实施（P14）|
+| [DD-003](DD-003-card-detail-and-artifacts.md) | 卡片详情 modal：artifact 提取（CR/issue/branch）+ 卡点追踪 | **Proposed** |
 
 ## 模板
 
