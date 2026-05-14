@@ -25,7 +25,9 @@
 - [9. 端到端走查](#9-端到端走查)
 - [10. 迁移方案](#10-迁移方案)
 - [11. 风险与回滚](#11-风险与回滚)
-- [12. 开放问题](#12-开放问题)
+- [12. 扩展哲学与契约](#12-扩展哲学与契约)
+- [13. 开放问题](#13-开放问题)
+- [14. 推进顺序](#14-推进顺序)
 
 ---
 
@@ -787,7 +789,293 @@ sequenceDiagram
 
 ---
 
-## 12. 开放问题
+## 12. 扩展哲学与契约
+
+DD-002 不只是当前 pipeline 的设计，也是未来所有 AI 功能扩展的脚手架。
+这一节明确这套架构的设计哲学、核心不变量、和新功能接入的契约。
+
+### 12.1 设计哲学（6 条原则）
+
+#### 原则 1：File-as-contract（磁盘数据产物即接口）
+
+每一层产出的是**磁盘上的稳定文件**，不是函数返回值。下游层读文件，
+不读上游内存。
+
+| 好处 | 代价 |
+|---|---|
+| 多进程天然安全 | 略多 I/O |
+| 崩溃自然恢复（mtime 是状态） | 略多磁盘占用 |
+| 易调试（`cat`、`ls -lt` 就是诊断工具） | |
+| 函数签名可自由重构，文件 schema 才是真契约 | |
+
+#### 原则 2：Single-writer per file（单写者原则）
+
+每个 cache 文件**有且仅有一个写者脚本**。读者可以无限多，但写者只能
+一个。
+
+```
+cache/mindmap.json      ← classify.py 写（唯一）
+cache/summaries/X.md    ← summarize.py 写（唯一，per-sid）
+cache/suggestions.json  ← suggest.py 写（唯一，未来）
+```
+
+理由：多写者 = 竞争 + schema 漂移 + 责任不清。一旦允许多写，后续每个
+功能都觉得"我也能加一笔"，文件就成杂烩。
+
+#### 原则 3：mtime as universal dirty signal（mtime 作普适脏位）
+
+所有"X 是否过时"的判断都用 `os.stat().st_mtime` 比较。**不维护独立的
+dirty flag 文件**。
+
+```
+T0: jsonl mtime
+T1: cache/sessions/<sid>.json mtime
+T2: cache/summaries/<sid>.md mtime
+T3: cache/mindmap.json mtime
+```
+
+新功能也应当遵守：用自己的输出文件 mtime 判断是否需要重跑。
+
+副作用红利：`ls -lt cache/` 直接告诉你 pipeline 的"健康度"。
+
+#### 原则 4：Graceful degradation（优雅降级）
+
+缺数据产物 = **功能不可用，永不崩溃**。
+
+| 场景 | 期望行为 |
+|---|---|
+| cache/mindmap.json 缺失 | render-html 显示"还没有数据"，提示运行 refresh |
+| cache/summaries/X.md 缺失 | Layer 2 把 X 当 cold 处理，不报错 |
+| cache/suggestions.json 缺失 | HTML 不渲染建议角标，主视图正常 |
+| 新功能整个未启用 | render-html 完全不知道它存在，正常工作 |
+
+#### 原则 5：Rule of Three for abstractions（三例原则）
+
+**不要为一个、两个用例提抽象。等出现第三个雷同 case 再提**。
+
+理由：
+
+- 1 个用例时你不知道哪些是 essence、哪些是 incident
+- 2 个用例时容易被表面相似性骗（看似 pattern，其实差异更大）
+- 3 个用例时 essence vs incident 清晰可辨
+
+适用候选：
+
+| 候选 helper | 需要 N 个用例后再提 |
+|---|---|
+| `bin/_ai_call.py`（Haiku 调用封装） | 第 3 个调 Haiku 的脚本 |
+| `bin/_dirty.py`（mtime 比较） | 第 3 个用 dirty tracking 的功能 |
+| `bin/_coalesce.sh`（flock + pending） | 第 3 个需要 coalesce 的脚本 |
+| `bin/_cache_writer.py`（atomic 写） | 第 3 个有 atomic 需求的写者 |
+
+DD-002 落地后第 1、2 个 AI 调用是 Layer 1 / Layer 2，第 3 个出现时
+（可能是 suggest.py 之类）才开始提 helper。
+
+#### 原则 6：Hooks as triggers, not callbacks（hook 只是触发器）
+
+Stop hook、SessionStart hook 应当**fire-and-forget**——立即返回，
+不等待结果。
+
+```
+hook fires → refresh-bg.sh fork-and-detach → exit (< 100ms)
+                                    ↓
+                          后续 Layer 0/1/2/etc. 在后台跑
+```
+
+新功能**不允许在 hook handler 里同步阻塞**。所有重活通过 mtime dirty
+tracking 异步触发。
+
+### 12.2 核心链路（Canonical pipeline）
+
+这是**不可被新功能修改**的主干。任何新功能必须**作为并行支路**接
+入，不能在主干上插一脚。
+
+```mermaid
+flowchart TD
+    subgraph Trigger["触发层"]
+        H1["Stop hook"]
+        H2["SessionStart hook"]
+        H3["launchd 2h"]
+        H4["mindmap --refresh"]
+    end
+
+    subgraph Core["核心三层（canonical）"]
+        T["refresh-bg.sh<br/>分发器"]
+        L0["Layer 0<br/>extract.py"]
+        L1["Layer 1<br/>summarize.py"]
+        L2["Layer 2<br/>classify.py"]
+    end
+
+    subgraph Products["数据产物（只读契约）"]
+        D0["cache/sessions/"]
+        D1["cache/summaries/"]
+        D2["cache/mindmap.json"]
+    end
+
+    subgraph Render["渲染"]
+        R1["render.py / -html / -tree"]
+    end
+
+    H1 & H2 & H3 & H4 --> T
+    T --> L0 --> D0
+    D0 --> L1 --> D1
+    D1 --> L2 --> D2
+    D2 --> R1
+
+    style Core fill:#a8e6cf,color:#000
+    style Products fill:#fff3a0,color:#000
+```
+
+**主干上的不变量**（重申，参考 [§12 关键不变量](../ARCHITECTURE.md#12-关键不变量)）：
+
+1. mindmap.json schema_version == 2
+2. session_id 是完整 UUID
+3. Task done 单调
+4. Archived initiative 不进 PRIOR
+5. cache/last_ai_run.epoch（DD-002 后废弃）由专门 marker 标记真实 AI 跑过的时间
+
+### 12.3 扩展契约（新功能必须遵守的 6 条）
+
+任何新 AI 功能（如工作建议、prompt 建议、健康度分析）接入时，必须：
+
+| # | 契约 | 形式化 |
+|---|---|---|
+| 1 | **只读主干产物** | 只读 `cache/sessions/`、`cache/summaries/`、`cache/mindmap.json`；不写、不改 schema |
+| 2 | **独立数据产物** | 写到 `cache/<feature>/` 或 `cache/<feature>.json`；自己的目录自己管 |
+| 3 | **独立 prompt 文件** | `prompts/<feature>.md`；不复用、不修改 `classify-cross-session.md` 等主干 prompt |
+| 4 | **同套并发模型** | 用 DD-002 的 mtime dirty + flock + coalesce；不发明新机制 |
+| 5 | **独立 cost budget** | 在 config.json 声明 `<feature>.budget_per_hour`；不蹭主干预算 |
+| 6 | **渲染层降级** | render-html.py 把新功能当 enhancement；产物缺失时主视图照常 |
+
+任何违反这 6 条的扩展都应当被 review 拒绝。如果你强烈觉得某条契约需要
+打破，**先开 DD 讨论修改契约**，不要在功能 PR 里偷偷破。
+
+### 12.4 未来功能接入示意
+
+```mermaid
+flowchart LR
+    subgraph CanonicalProducts["主干数据产物（只读）"]
+        D0["sessions/"]
+        D1["summaries/"]
+        D2["mindmap.json"]
+    end
+
+    subgraph FA["未来功能 A: 工作建议"]
+        FAB["bin/suggest.py"]
+        FAB --> FAP["cache/suggestions.json"]
+    end
+
+    subgraph FB["未来功能 B: prompt 建议"]
+        FBB["bin/prompt-suggest.py"]
+        FBB --> FBP["cache/prompt-hints/"]
+    end
+
+    subgraph FC["未来功能 C: 项目健康度"]
+        FCB["bin/health.py"]
+        FCB --> FCP["cache/health.json"]
+    end
+
+    D1 -.->|read| FAB
+    D2 -.->|read| FAB
+    D1 -.->|read| FBB
+    D2 -.->|read| FCB
+
+    FAP -.-> HTML["render-html.py<br/>(可选渲染)"]
+    FBP -.-> CLI["mindmap CLI<br/>(可选 subcommand)"]
+    FCP -.-> HTML
+
+    style CanonicalProducts fill:#fff3a0,color:#000
+    style FA fill:#e8f5e9,color:#000
+    style FB fill:#e8f5e9,color:#000
+    style FC fill:#e8f5e9,color:#000
+```
+
+具体 3 个例子（仅 sketch，不在 DD-002 范围）：
+
+**A. AI 工作建议**
+
+```
+bin/suggest.py:
+  触发: cron 每小时一次 / mindmap --suggest
+  读:   cache/summaries/*.md（hot 的） + cache/mindmap.json
+  prompt: prompts/suggest.md
+          "基于这些 initiative，给我下一步该做什么的 5 条建议"
+  写:   cache/suggestions.json
+        [{init_id, priority, suggestion, rationale}, ...]
+  成本: ~$0.03/call
+  渲染: HTML 卡片右上角 💡 角标，点击展开
+```
+
+**B. Prompt 建议**
+
+```
+bin/prompt-suggest.py:
+  触发: SessionStart hook
+  读:   cache/summaries/<相关 sids>.md, cache/mindmap.json
+  prompt: prompts/prompt-suggest.md
+          "基于这些类似的过去 session，推荐 3 个 prompt 起点"
+  写:   cache/prompt-hints/<新 sid>.md
+  成本: ~$0.01/call
+  渲染: 用户在 Claude Code 里 /hints 读
+```
+
+**C. 项目健康度**
+
+```
+bin/health.py:
+  触发: launchd 每天 1 次
+  读:   cache/mindmap.json
+  prompt: prompts/health.md
+          "分析每个 initiative 的健康度：阻塞 / 缓慢 / 健康"
+  写:   cache/health.json
+  成本: ~$0.05/day
+  渲染: HTML 顶部 banner "X 个阻塞项目"
+```
+
+三个功能都遵守了 6 条契约，互不打架，互不依赖。
+
+### 12.5 反模式（明确不能做的事）
+
+| 反模式 | 后果 | 应该怎么做 |
+|---|---|---|
+| 给 mindmap.json 加新字段（如 `suggestions: [...]`） | 多写者竞争；schema 膨胀；解析错乱 | 写到 `cache/<feature>.json`，render 时合并展示 |
+| 改 `cache/summaries/<sid>.md` 加新段 | Layer 2 看到污染；其它消费者 confused | 写到 `cache/<feature>/<sid>.md` |
+| 复用 Layer 2 的 prompt 加自己的 instruction | Prompt 失控膨胀；Haiku 输出质量下降 | 独立 prompt 文件、独立 AI 调用 |
+| 直接 import extract.py 内部函数 | 重构 extract 时多调用方耦合 | 通过文件契约消费它的输出 |
+| 为新功能加新的全局锁 | 多套并发模型互相打架 | 用 DD-002 同款 flock + coalesce |
+| 让新功能在 Stop hook 里同步阻塞 | hook 响应慢，用户感知到延迟 | fork-and-detach，让 mtime 触发后续 |
+| 给新功能加自己的 launchd plist | 多个独立调度任务，难管理 | 通过 refresh-bg.sh 路由 |
+| 新功能写 mindmap.json mtime | 误触发 Layer 2 重跑 | 只 mtime 自己的产物 |
+
+### 12.6 全局风险与缓解
+
+| 风险 | 当前对策 | 未来加强 |
+|---|---|---|
+| 累计 AI 调用 cost 失控 | 每个 layer 独立 cooldown / coalesce | config.json 加 `feature_budgets` 段；超限拒绝触发 |
+| 多个功能抢 Stop hook 资源 | refresh-bg.sh 统一路由 | 任何 hook 配置只指向 refresh-bg.sh |
+| 数据竞争 | 单一 writer 原则 | 通过 review 把关 |
+| 启动顺序依赖 | 优雅降级原则 | 通过 review 把关 |
+| 配置爆炸 | env vars + config.json | 第 3 个新配置需求时统一成 yaml/toml |
+| 磁盘空间 | summaries/ 长期增长 | GC 策略：>30 天未动且 initiative archived 的 summary 删除 |
+| 突发流量 | coalesce 已限频 | 第 3 个高频功能时再上软上限（如全局每小时 AI 调用 ≤ 50 次） |
+
+### 12.7 什么时候 review / 升级契约
+
+契约不是一成不变。在以下时机考虑修订：
+
+- **3+ 个功能都想做同一件被禁止的事**——说明契约有 gap，需要补条款
+- **某条契约从未被违反**——说明它可能多余，可以放松
+- **新功能依赖现有功能的输出**——形成 feature 间依赖链。第 1 次允许
+  （Feature B 读 Feature A 的产物，不读它的内部）；第 2 次开 DD 评估
+  要不要把 A 升级到"准核心"
+- **Anthropic API 变化**（如新模型、新 cache 机制）——可能要改主干，
+  顺便重审契约
+
+每次契约修订都通过新的 DD-N 走流程，更新本 §12，不在功能 PR 里偷改。
+
+---
+
+## 13. 开放问题
 
 ### 12.1 已对齐（结合之前讨论）
 
@@ -835,7 +1123,7 @@ sequenceDiagram
 
 ---
 
-## 13. 推进顺序
+## 14. 推进顺序
 
 按风险 / 成本权衡，建议这个顺序：
 

@@ -27,7 +27,9 @@
 - [9. End-to-end walkthroughs](#9-end-to-end-walkthroughs)
 - [10. Migration](#10-migration)
 - [11. Risk & rollback](#11-risk--rollback)
-- [12. Open questions](#12-open-questions)
+- [12. Extension philosophy & contracts](#12-extension-philosophy--contracts)
+- [13. Open questions](#13-open-questions)
+- [14. Implementation order](#14-implementation-order)
 
 ---
 
@@ -797,7 +799,308 @@ Each Phase rolls back via git revert; cache schema is forward-compatible:
 
 ---
 
-## 12. Open questions
+## 12. Extension philosophy & contracts
+
+DD-002 is not just the current pipeline; it's also the scaffolding for
+every future AI feature. This section spells out the design philosophy,
+core invariants, and the contract any new feature must follow.
+
+### 12.1 Six principles
+
+#### Principle 1: File-as-contract
+
+Each layer produces a **stable file on disk**, not a function return
+value. Downstream reads from disk, not from upstream memory.
+
+| Benefit | Cost |
+|---|---|
+| Naturally multi-process safe | A bit more I/O |
+| Crash-recovers automatically (mtime is state) | A bit more disk |
+| Easy to debug (`cat`, `ls -lt` are diagnostic tools) | |
+| Function signatures can refactor freely; file shape is the real contract | |
+
+#### Principle 2: Single-writer per file
+
+Each cache file has **exactly one writer script**. Any number of
+readers, but only one writer.
+
+```
+cache/mindmap.json      ← classify.py (unique)
+cache/summaries/X.md    ← summarize.py (unique, per-sid)
+cache/suggestions.json  ← suggest.py (unique, future)
+```
+
+Reason: multiple writers = races + schema drift + ownership confusion.
+Once you allow multiple writers, every future feature will want to
+"just add one field," and the file becomes a stew.
+
+#### Principle 3: mtime as universal dirty signal
+
+Every "is X stale" decision uses `os.stat().st_mtime` comparison. **No
+separate dirty-flag files**.
+
+```
+T0: jsonl mtime
+T1: cache/sessions/<sid>.json mtime
+T2: cache/summaries/<sid>.md mtime
+T3: cache/mindmap.json mtime
+```
+
+New features should follow: use their own output file's mtime to decide
+whether to re-run.
+
+Side benefit: `ls -lt cache/` tells you the pipeline's "health" at a
+glance.
+
+#### Principle 4: Graceful degradation
+
+Missing data product = **feature unavailable, never crash**.
+
+| Scenario | Expected behavior |
+|---|---|
+| cache/mindmap.json missing | render-html shows "no data yet", suggests running refresh |
+| cache/summaries/X.md missing | Layer 2 treats X as cold, no error |
+| cache/suggestions.json missing | HTML doesn't render the suggestion badge, main UI works |
+| New feature not installed | render-html doesn't even know about it, works normally |
+
+#### Principle 5: Rule of Three for abstractions
+
+**Don't extract an abstraction for one or two cases. Wait for the third
+identical case.**
+
+Why:
+
+- With 1 case, you can't tell essence from incident
+- With 2 cases, surface similarity may fool you (looks like a pattern, isn't)
+- With 3 cases, essence vs incident is clearly visible
+
+Candidate helpers:
+
+| Candidate | Wait for N cases |
+|---|---|
+| `bin/_ai_call.py` (Haiku call wrapper) | 3rd Haiku-calling script |
+| `bin/_dirty.py` (mtime compare) | 3rd dirty-tracking feature |
+| `bin/_coalesce.sh` (flock + pending) | 3rd coalesce-needing script |
+| `bin/_cache_writer.py` (atomic write) | 3rd atomic writer |
+
+After DD-002 lands, the first two AI invocations are Layer 1 and
+Layer 2. When a third appears (probably suggest.py-like), THAT's when
+we extract.
+
+#### Principle 6: Hooks as triggers, not callbacks
+
+Stop hook, SessionStart hook should be **fire-and-forget** — return
+immediately, don't wait for results.
+
+```
+hook fires → refresh-bg.sh fork-and-detach → exit (< 100ms)
+                                    ↓
+                       remaining Layer 0/1/2/etc. run in background
+```
+
+New features **must not block synchronously in a hook handler**. All
+heavy work goes through mtime dirty tracking, async.
+
+### 12.2 Canonical pipeline
+
+This is the **trunk that new features must NOT modify**. New features
+must hook in as **parallel branches**, never inserted into the trunk.
+
+```mermaid
+flowchart TD
+    subgraph Trigger["Trigger layer"]
+        H1["Stop hook"]
+        H2["SessionStart hook"]
+        H3["launchd 2h"]
+        H4["mindmap --refresh"]
+    end
+
+    subgraph Core["Canonical 3 layers"]
+        T["refresh-bg.sh<br/>dispatcher"]
+        L0["Layer 0<br/>extract.py"]
+        L1["Layer 1<br/>summarize.py"]
+        L2["Layer 2<br/>classify.py"]
+    end
+
+    subgraph Products["Data products (read-only contract)"]
+        D0["cache/sessions/"]
+        D1["cache/summaries/"]
+        D2["cache/mindmap.json"]
+    end
+
+    subgraph Render["Render"]
+        R1["render.py / -html / -tree"]
+    end
+
+    H1 & H2 & H3 & H4 --> T
+    T --> L0 --> D0
+    D0 --> L1 --> D1
+    D1 --> L2 --> D2
+    D2 --> R1
+
+    style Core fill:#a8e6cf,color:#000
+    style Products fill:#fff3a0,color:#000
+```
+
+**Trunk invariants** (reaffirmed; cross-ref
+[§12 Key invariants](../ARCHITECTURE.md#12-key-invariants)):
+
+1. mindmap.json schema_version == 2
+2. session_id is full UUID
+3. Task done is monotone
+4. Archived initiatives don't enter PRIOR
+5. cache/last_ai_run.epoch (deprecated after DD-002) is replaced by a
+   dedicated marker for "real AI ran"
+
+### 12.3 Extension contract (six rules every new feature follows)
+
+Any new AI feature (work suggestions, prompt hints, health checks…)
+must:
+
+| # | Contract | Concrete form |
+|---|---|---|
+| 1 | **Read-only on trunk products** | Read `cache/sessions/`, `cache/summaries/`, `cache/mindmap.json`; never write, never change their schema |
+| 2 | **Own data product** | Write to `cache/<feature>/` or `cache/<feature>.json`; manage your own dir |
+| 3 | **Own prompt file** | `prompts/<feature>.md`; never reuse or modify trunk prompts like `classify-cross-session.md` |
+| 4 | **Same concurrency model** | Use DD-002's mtime dirty + flock + coalesce; don't invent new mechanisms |
+| 5 | **Own cost budget** | Declare `<feature>.budget_per_hour` in config.json; don't piggyback on trunk budget |
+| 6 | **Render-layer degradation** | render-html.py treats new feature as enhancement; main UI works if product is missing |
+
+Any extension violating these six rules should be rejected in review.
+If you feel strongly a contract needs breaking, **open a DD to revise
+the contract first**; don't sneak it in a feature PR.
+
+### 12.4 Hook-up examples for future features
+
+```mermaid
+flowchart LR
+    subgraph CanonicalProducts["Trunk products (read-only)"]
+        D0["sessions/"]
+        D1["summaries/"]
+        D2["mindmap.json"]
+    end
+
+    subgraph FA["Future A: work suggestions"]
+        FAB["bin/suggest.py"]
+        FAB --> FAP["cache/suggestions.json"]
+    end
+
+    subgraph FB["Future B: prompt hints"]
+        FBB["bin/prompt-suggest.py"]
+        FBB --> FBP["cache/prompt-hints/"]
+    end
+
+    subgraph FC["Future C: project health"]
+        FCB["bin/health.py"]
+        FCB --> FCP["cache/health.json"]
+    end
+
+    D1 -.->|read| FAB
+    D2 -.->|read| FAB
+    D1 -.->|read| FBB
+    D2 -.->|read| FCB
+
+    FAP -.-> HTML["render-html.py<br/>(optional render)"]
+    FBP -.-> CLI["mindmap CLI<br/>(optional subcommand)"]
+    FCP -.-> HTML
+
+    style CanonicalProducts fill:#fff3a0,color:#000
+    style FA fill:#e8f5e9,color:#000
+    style FB fill:#e8f5e9,color:#000
+    style FC fill:#e8f5e9,color:#000
+```
+
+Three concrete sketches (not in DD-002 scope, just illustrative):
+
+**A. AI work suggestions**
+
+```
+bin/suggest.py:
+  trigger: cron hourly / mindmap --suggest
+  reads:   cache/summaries/*.md (hot), cache/mindmap.json
+  prompt:  prompts/suggest.md
+           "Given these initiatives, suggest 5 next-step actions"
+  writes:  cache/suggestions.json
+           [{init_id, priority, suggestion, rationale}, ...]
+  cost:    ~$0.03/call
+  render:  💡 badge on HTML card; click to expand
+```
+
+**B. Prompt suggestions**
+
+```
+bin/prompt-suggest.py:
+  trigger: SessionStart hook
+  reads:   cache/summaries/<related-sids>.md, cache/mindmap.json
+  prompt:  prompts/prompt-suggest.md
+           "Based on similar past sessions, recommend 3 prompt starters"
+  writes:  cache/prompt-hints/<new-sid>.md
+  cost:    ~$0.01/call
+  render:  Read via /hints slash command in Claude Code
+```
+
+**C. Project health**
+
+```
+bin/health.py:
+  trigger: launchd daily
+  reads:   cache/mindmap.json
+  prompt:  prompts/health.md
+           "Score each initiative's health: blocked / slow / healthy"
+  writes:  cache/health.json
+  cost:    ~$0.05/day
+  render:  Banner at top of HTML showing "X initiatives blocked"
+```
+
+All three obey all six contracts, don't conflict with each other,
+don't depend on each other.
+
+### 12.5 Anti-patterns (things explicitly disallowed)
+
+| Anti-pattern | Consequence | What to do instead |
+|---|---|---|
+| Add new field to mindmap.json (e.g. `suggestions: [...]`) | Multi-writer race; schema bloat; parsing confusion in other readers | Write to `cache/<feature>.json`, merge at render time |
+| Modify `cache/summaries/<sid>.md` to add new section | Layer 2 sees polluted data; other consumers confused | Write to `cache/<feature>/<sid>.md` |
+| Reuse Layer 2 prompt + add own instructions | Prompt sprawl; Haiku output quality degrades | Independent prompt file, independent AI call |
+| Directly import extract.py internals | Refactor coupling across callers | Consume via file contract |
+| Add a new global lock for the new feature | Multiple concurrency models that fight | Use DD-002's flock + coalesce |
+| Block synchronously in the Stop hook | Slow hook response, user-perceived latency | fork-and-detach, let mtime trigger downstream |
+| Add own launchd plist | Multiple independent schedules, hard to manage | Route through refresh-bg.sh |
+| Touch mindmap.json mtime | Falsely triggers Layer 2 rerun | Only touch your own product's mtime |
+
+### 12.6 Global risks and mitigations
+
+| Risk | Today's mitigation | Future strengthening |
+|---|---|---|
+| Aggregate AI cost runs away | Each layer has its own cooldown / coalesce | config.json `feature_budgets` section; over-limit refuses trigger |
+| Multiple features competing for Stop hook | refresh-bg.sh is sole router | All hook config points at refresh-bg.sh |
+| Data races | Single-writer principle | Enforce via review |
+| Startup-order dependencies | Graceful degradation principle | Enforce via review |
+| Configuration sprawl | Mix of env vars + config.json | Unify into yaml/toml on the 3rd new config need |
+| Disk space | summaries/ grows over time | GC: delete summaries >30d untouched and initiative archived |
+| Bursty traffic | coalesce already rate-limits | Add soft global cap (e.g. ≤50 AI calls/hr) on the 3rd high-frequency feature |
+
+### 12.7 When to review / revise the contract
+
+The contract isn't immutable. Consider revision when:
+
+- **3+ features all want to do something currently forbidden** — the
+  contract has a gap; add a clause
+- **A contract clause has never been violated** — it may be unnecessary;
+  consider relaxing
+- **A new feature depends on another feature's output** — feature-to-
+  feature dependency chain. First instance: allowed (B reads A's
+  product, not A's internals). Second: open a DD to consider promoting
+  A to "near-trunk" status
+- **Anthropic API changes** (new model, new cache mechanism) — may need
+  trunk refactor; review contracts at the same time
+
+Each contract revision goes through a new DD-N flow and updates this
+§12. Never modify in a feature PR.
+
+---
+
+## 13. Open questions
 
 ### 12.1 Aligned (from prior discussion)
 
@@ -830,7 +1133,7 @@ Each Phase rolls back via git revert; cache schema is forward-compatible:
 
 ---
 
-## 13. Implementation order
+## 14. Implementation order
 
 By risk/cost tradeoff:
 
