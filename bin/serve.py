@@ -47,6 +47,7 @@ ARCHIVE_DIR = CACHE_DIR / "archive"
 RENDER_HTML = REPO_ROOT / "bin" / "render-html.py"
 RENDER_TREE = REPO_ROOT / "bin" / "render-tree.py"
 REFRESH_SH = REPO_ROOT / "bin" / "refresh.sh"
+PIPELINE_RUN = REPO_ROOT / "bin" / "pipeline-run.sh"
 
 PORTS = [9876, 9877, 9878]
 BIND = "127.0.0.1"
@@ -312,19 +313,34 @@ class Handler(BaseHTTPRequestHandler):
             return self._reply(500, {"error": str(e)})
 
     def _handle_refresh(self, body: dict):
-        """Kick off bin/refresh.sh in the background. Non-blocking."""
-        if not REFRESH_SH.exists():
-            return self._reply(503, {"error": "refresh.sh missing"})
+        """Kick off the AI pipeline in the background. Non-blocking.
+
+        Routes to bin/pipeline-run.sh (new 3-layer pipeline) unless the
+        legacy fallback is requested via CLAUDE_WORKTREE_LEGACY_PIPELINE.
+        """
         env = os.environ.copy()
-        if body.get("force"):
-            env["CLAUDE_WORKTREE_FORCE"] = "1"
+        legacy = env.get("CLAUDE_WORKTREE_LEGACY_PIPELINE") == "1"
+
+        if legacy:
+            if not REFRESH_SH.exists():
+                return self._reply(503, {"error": "refresh.sh missing"})
+            if body.get("force"):
+                env["CLAUDE_WORKTREE_FORCE"] = "1"
+            argv = ["bash", str(REFRESH_SH)]
+        else:
+            if not PIPELINE_RUN.exists():
+                return self._reply(503, {"error": "pipeline-run.sh missing"})
+            # Sweep dirty + always trigger Layer 2 (this is the "manual
+            # refresh" semantics: user clicked a button, they want a result)
+            argv = ["bash", str(PIPELINE_RUN), "--all-dirty", "--force-classify"]
         try:
             subprocess.Popen(
-                ["bash", str(REFRESH_SH)],
-                env=env,
+                argv, env=env,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
-            return self._reply(202, {"ok": True, "note": "refresh started in background"})
+            return self._reply(202, {"ok": True,
+                                     "note": "pipeline started in background",
+                                     "legacy": legacy})
         except Exception as e:
             return self._reply(500, {"error": str(e)})
 
