@@ -18,6 +18,7 @@ DO_TREE=0
 DO_SERVE=0
 DO_DIAGNOSE=0
 DO_COST=0
+DO_BACKFILL=0
 NO_OPEN=0
 DIAG_ARG=""
 COST_ARG=""
@@ -48,6 +49,8 @@ while [ $# -gt 0 ]; do
         COST_ARG="$1"; shift
       fi
       ;;
+    --backfill)
+      DO_BACKFILL=1; shift ;;
     -h|--help)
       cat <<EOF
 Usage: mindmap [--refresh] [--serve | --open | --html | --tree | --diagnose]
@@ -68,6 +71,8 @@ Without flags: render the cached mindmap to stdout as an ANSI tree.
   --cost [PERIOD]     Show AI call counts and costs.
                       PERIOD: today | week | month | all | log | json.
                       Default (no arg): today + last 7 days table.
+  --backfill          Re-summarize every session (one-shot migration).
+                      Cost ~\$0.04 per session × ~200 sessions = ~\$8.
 EOF
       exit 0
       ;;
@@ -95,6 +100,22 @@ if [ "$DO_COST" -eq 1 ]; then
   fi
 fi
 
+if [ "$DO_BACKFILL" -eq 1 ]; then
+  echo "About to backfill summaries for all sessions."
+  echo "This will call Haiku once per session (cost ~\$0.04/session)."
+  N=$(ls "$REPO_ROOT/cache/sessions/" 2>/dev/null | wc -l | tr -d '[:space:]')
+  S=$(ls "$REPO_ROOT/cache/summaries/" 2>/dev/null | wc -l | tr -d '[:space:]')
+  echo "Sessions cached: $N    Summaries already present: $S"
+  echo "Estimated to do: ~$((N - S)) calls, ~\$$(( (N - S) * 4 / 100 ))"
+  echo
+  read -r -p "Proceed? [y/N] " yn
+  case "$yn" in
+    y|Y|yes|YES) ;;
+    *) echo "aborted"; exit 0 ;;
+  esac
+  exec bash "$REPO_ROOT/bin/pipeline-run.sh" --backfill --force-classify
+fi
+
 if [ "$DO_SERVE" -eq 1 ]; then
   if [ "$NO_OPEN" -eq 1 ]; then
     exec python3 "$REPO_ROOT/bin/serve.py" --no-open
@@ -104,7 +125,12 @@ if [ "$DO_SERVE" -eq 1 ]; then
 fi
 
 if [ "$DO_REFRESH" -eq 1 ]; then
-  CLAUDE_WORKTREE_FORCE=1 bash "$REPO_ROOT/bin/refresh.sh" >&2
+  if [ "${CLAUDE_WORKTREE_LEGACY_PIPELINE:-}" = "1" ]; then
+    CLAUDE_WORKTREE_FORCE=1 bash "$REPO_ROOT/bin/refresh.sh" >&2
+  else
+    # New pipeline: sweep dirty, force a Layer 2 run at the end
+    bash "$REPO_ROOT/bin/pipeline-run.sh" --all-dirty --force-classify >&2
+  fi
 fi
 
 if [ "$DO_HTML" -eq 1 ] || [ "$DO_OPEN" -eq 1 ] || [ "$DO_TREE" -eq 1 ]; then
