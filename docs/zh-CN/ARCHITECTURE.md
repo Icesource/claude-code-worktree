@@ -18,18 +18,18 @@ ANSI 树/HTML 卡片/markmap。整个流程在 hook 里**自动**跑。
 
 ```mermaid
 flowchart LR
-    A["~/.claude/projects/<br/>*.jsonl<br/>(Claude Code 原始日志)"] --> B[extract.py]
+    A["~/.claude/projects/<br/>*.jsonl<br/>(Claude Code 原始日志)"] --> B["extract.py"]
     B --> C["cache/sessions/<br/>(每 session 一份摘要)"]
-    C --> D[aggregate.py]
+    C --> D["aggregate.py"]
     D --> E["cache/aggregate_input.json<br/>(200 session 拼起来)"]
     E --> F["claude -p<br/>Haiku 4.5"]
-    G["cache/mindmap.json<br/>(上一轮结果)"] -.PRIOR_MINDMAP.-> F
+    G["cache/mindmap.json<br/>(上一轮结果)"] -.->|PRIOR_MINDMAP| F
     F --> H["cache/mindmap.json<br/>(新一轮结果)"]
-    H --> R1[render.py - ANSI 树]
-    H --> R2[render-html.py - 卡片]
-    H --> R3[render-tree.py - 思维导图]
+    H --> R1["render.py — ANSI 树"]
+    H --> R2["render-html.py — 卡片"]
+    H --> R3["render-tree.py — 思维导图"]
     U["用户在 UI 上的<br/>勾选/归档/删除"] -.->|"POST /api/save"| OV["cache/user_overrides.json"]
-    OV -.合并进 mindmap.json.-> H
+    OV -.->|"合并进 mindmap.json"| H
 
     style F fill:#fff3a0,color:#000
     style H fill:#a8e6cf,color:#000
@@ -134,43 +134,43 @@ claude-code-worktree/
 
 ```mermaid
 graph TD
-    install[install.sh] -.写.-> set[~/.claude/settings.json]
-    install -.符号链接.-> sym[~/.local/bin/mindmap]
-    install -.复制.-> sc[~/.claude/commands/*.md]
-    install -.写.-> la[~/Library/LaunchAgents/*.plist]
+    install["install.sh"] -.->|写| set["~/.claude/settings.json"]
+    install -.->|符号链接| sym["~/.local/bin/mindmap"]
+    install -.->|复制| sc["~/.claude/commands/*.md"]
+    install -.->|写| la["~/Library/LaunchAgents/*.plist"]
 
-    set -."Stop/SessionStart<br/>hook 触发".-> bg[refresh-bg.sh]
-    la -."每 2h".-> bg
-    sym --> mm[mindmap]
+    set -.->|"Stop/SessionStart<br/>hook 触发"| bg["refresh-bg.sh"]
+    la -.->|"每 2h"| bg
+    sym --> mm["mindmap"]
 
-    mm --> render[render.py]
-    mm --> rh[render-html.py]
-    mm --> rt[render-tree.py]
-    mm --> srv[serve.py]
-    mm --> diag[diagnose.py]
-    mm --> rfsh[refresh.sh]
+    mm --> render["render.py"]
+    mm --> rh["render-html.py"]
+    mm --> rt["render-tree.py"]
+    mm --> srv["serve.py"]
+    mm --> diag["diagnose.py"]
+    mm --> rfsh["refresh.sh"]
 
-    bg --> rec[record-location.py]
+    bg --> rec["record-location.py"]
     bg --> rfsh
 
-    rfsh --> ext[extract.py]
-    rfsh --> agg[aggregate.py]
-    rfsh -.读.-> pmpt[prompts/classify.md]
+    rfsh --> ext["extract.py"]
+    rfsh --> agg["aggregate.py"]
+    rfsh -.->|读| pmpt["prompts/classify.md"]
     rfsh --> rh
     rfsh --> rt
-    rfsh -.spawn.-> claude["claude -p<br/>Haiku 4.5"]
+    rfsh -.->|spawn| claude["claude -p<br/>Haiku 4.5"]
 
-    srv -.spawn.-> rh
-    srv -.spawn.-> rt
-    srv -.spawn.-> rfsh
-    srv -.zellij action.-> zj[Zellij]
+    srv -.->|spawn| rh
+    srv -.->|spawn| rt
+    srv -.->|spawn| rfsh
+    srv -.->|"zellij action"| zj["Zellij"]
 
-    ext -.读.-> jl["~/.claude/projects/<br/>*.jsonl"]
-    ext -.写.-> sess[cache/sessions/]
-    agg -.读.-> sess
-    agg -.写.-> agi[cache/aggregate_input.json]
-    rec -.写.-> loc[cache/session_locations.json]
-    rfsh -.写.-> mj[cache/mindmap.json]
+    ext -.->|读| jl["~/.claude/projects/<br/>*.jsonl"]
+    ext -.->|写| sess["cache/sessions/"]
+    agg -.->|读| sess
+    agg -.->|写| agi["cache/aggregate_input.json"]
+    rec -.->|写| loc["cache/session_locations.json"]
+    rfsh -.->|写| mj["cache/mindmap.json"]
 
     style mj fill:#a8e6cf,color:#000
     style claude fill:#fff3a0,color:#000
@@ -190,34 +190,34 @@ graph TD
 
 ```mermaid
 flowchart TD
-    Start([refresh.sh 启动<br/>echo [hook] timestamp]) --> Lock{mkdir<br/>refresh.lock.d<br/>成功?}
-    Lock -- "失败" --> Stale{stale<br/>>660s?}
-    Stale -- "否" --> Exit1([exit 0:<br/>another running])
-    Stale -- "是" --> Recover[rm + 重建 lock]
+    Start(["refresh.sh 启动<br/>echo hook timestamp"]) --> Lock{"mkdir<br/>refresh.lock.d<br/>成功?"}
+    Lock -- "失败" --> Stale{"stale<br/>>660s?"}
+    Stale -- "否" --> Exit1(["exit 0:<br/>another running"])
+    Stale -- "是" --> Recover["rm + 重建 lock"]
     Lock -- "ok" --> ApplyOv
     Recover --> ApplyOv
 
     ApplyOv["阶段 1: 应用 user_overrides<br/>1. task done 翻转<br/>2. 删除 deleted_tasks<br/>3. 移除 archived initiatives<br/>4. 移除 deleted_ids initiatives<br/>(全部 in-place 改 mindmap.json)"] --> Extract
 
-    Extract["阶段 2: extract.py<br/>增量读 ~/.claude/projects/*.jsonl<br/>更新 cache/sessions/<sid>.json"] --> Agg
+    Extract["阶段 2: extract.py<br/>增量读 ~/.claude/projects/*.jsonl<br/>更新 cache/sessions/&lt;sid&gt;.json"] --> Agg
 
     Agg["阶段 3: aggregate.py<br/>过滤 is_automation, 排序<br/>裁到 200 条, 写 aggregate_input.json"] --> Empty
 
-    Empty{n_sessions == 0?}
-    Empty -- "是" --> EmptyOut[写空 mindmap.json]
-    EmptyOut --> Done0([exit 0])
+    Empty{"n_sessions == 0?"}
+    Empty -- "是" --> EmptyOut["写空 mindmap.json"]
+    EmptyOut --> Done0(["exit 0"])
     Empty -- "否" --> Hash
 
     Hash["阶段 4: hash 检查<br/>sha256(aggregate_input.json)<br/>vs last_input.sha256"] --> HashMatch
-    HashMatch{相同?}
+    HashMatch{"相同?"}
     HashMatch -- "是" --> BumpOnly["仅 bump mindmap.json<br/>generated_at<br/>+ 重生成 HTML"]
-    BumpOnly --> Done1([exit 0: skip-hash])
+    BumpOnly --> Done1(["exit 0: skip-hash"])
 
     HashMatch -- "否" --> Cool
 
     Cool["阶段 5: cooldown 闸门<br/>now - last_ai_run.epoch<br/>vs COOLDOWN_SECS=300"] --> CoolPass
-    CoolPass{已过冷却?<br/>或 FORCE=1?}
-    CoolPass -- "否" --> Done2([exit 0: skip-cooldown])
+    CoolPass{"已过冷却?<br/>或 FORCE=1?"}
+    CoolPass -- "否" --> Done2(["exit 0: skip-cooldown"])
     CoolPass -- "是" --> Lang
 
     Lang["阶段 6: 加载语言<br/>读 cache/config.json"] --> Prior
@@ -227,9 +227,9 @@ flowchart TD
 
     AI["阶段 10: claude -p<br/>Haiku 4.5<br/>--disallowedTools<br/>--output-format json"] --> Parse
 
-    Parse["阶段 11: 解析输出<br/>1. 提 JSON from ```fence<br/>2. 修复短 session_id<br/>(前缀匹配 aggregate_input)<br/>3. 写 mindmap.json<br/>4. 写 last_ai_run.epoch<br/>5. 写 last_input.sha256<br/>6. log DIFF vs prior"] --> Render
+    Parse["阶段 11: 解析输出<br/>1. 提 JSON from fence<br/>2. 修复短 session_id<br/>(前缀匹配 aggregate_input)<br/>3. 写 mindmap.json<br/>4. 写 last_ai_run.epoch<br/>5. 写 last_input.sha256<br/>6. log DIFF vs prior"] --> Render
 
-    Render["重生成 HTML<br/>render-html.py + render-tree.py"] --> DoneOK([exit 0:<br/>'OK ran AI'])
+    Render["重生成 HTML<br/>render-html.py + render-tree.py"] --> DoneOK(["exit 0:<br/>OK ran AI"])
 
     style AI fill:#fff3a0,color:#000
     style ApplyOv fill:#ffd3b6,color:#000
@@ -341,14 +341,14 @@ perl -e 'alarm shift @ARGV; exec @ARGV' "$CLAUDE_TIMEOUT_SECS" \
 
 ```mermaid
 flowchart TD
-    Start[refresh.sh 启动] --> Lock{lock 可拿?}
-    Lock -- "否" --> Skip1[skip locked<br/>另一次正在跑]
-    Lock -- "是" --> Force{CLAUDE_WORKTREE_<br/>FORCE=1?<br/>--refresh 触发}
-    Force -- "是" --> Run[**调 AI**]
-    Force -- "否" --> Hash{aggregate input<br/>hash 同上次?}
-    Hash -- "是" --> Skip2[skip hash-same<br/>仅 bump 时间戳]
-    Hash -- "否" --> Marker{last_ai_run.epoch<br/>距今 < 300s?}
-    Marker -- "是" --> Skip3[skip cooldown<br/>太频繁]
+    Start["refresh.sh 启动"] --> Lock{"lock 可拿?"}
+    Lock -- "否" --> Skip1["skip locked<br/>另一次正在跑"]
+    Lock -- "是" --> Force{"CLAUDE_WORKTREE_<br/>FORCE=1?<br/>(--refresh 触发)"}
+    Force -- "是" --> Run["调 AI"]
+    Force -- "否" --> Hash{"aggregate input<br/>hash 同上次?"}
+    Hash -- "是" --> Skip2["skip hash-same<br/>仅 bump 时间戳"]
+    Hash -- "否" --> Marker{"last_ai_run.epoch<br/>距今 &lt; 300s?"}
+    Marker -- "是" --> Skip3["skip cooldown<br/>太频繁"]
     Marker -- "否" --> Run
 
     style Run fill:#a8e6cf,color:#000
@@ -516,34 +516,34 @@ sequenceDiagram
     participant L as record-location.py
     participant R as refresh.sh
     participant E as extract.py
-    participant AI as claude -p (Haiku)
+    participant AI as Haiku via claude -p
     participant FS as cache/
 
     U->>CC: claude<br/>开新会话
-    CC->>CC: 创建 sid.jsonl<br/>(空)
+    CC->>CC: 创建 sid.jsonl 空文件
     CC->>CC: Trigger SessionStart hook
-    CC-->>H: 调 bash refresh-bg.sh<br/>(stdin: {session_id, cwd})
-    H->>L: 读 stdin + env<br/>(ZELLIJ_PANE_ID 等)
-    L->>FS: 写 session_locations.json[sid]
+    CC-->>H: 调 bash refresh-bg.sh<br/>stdin 含 session_id 和 cwd
+    H->>L: 读 stdin 和 env<br/>含 ZELLIJ_PANE_ID
+    L->>FS: 写 session_locations.json 中 sid 条目
     H->>R: fork + detach
     H-->>CC: 立即返回
 
-    U->>CC: 发消息 "这个 bug 怎么修"
-    CC->>FS: 追加 jsonl<br/>(user + assistant turn)
+    U->>CC: 发消息 这个 bug 怎么修
+    CC->>FS: 追加 jsonl<br/>新增 user 和 assistant turn
     CC-->>H: Stop hook 触发
     H->>R: fork
     R->>FS: mkdir lock 成功
-    R->>R: apply_overrides<br/>(无事可做)
+    R->>R: apply_overrides 无事可做
     R->>E: 跑 extract.py
-    E->>FS: 读 jsonl 新字节<br/>(byte offset 来自 state.json)
+    E->>FS: 读 jsonl 新字节<br/>byte offset 来自 state.json
     E->>FS: 写 cache/sessions/sid.json
     R->>FS: 跑 aggregate.py<br/>→ aggregate_input.json
-    R->>FS: hash check (新 sid 在里面, 不同)
-    R->>FS: cooldown check<br/>(假设 >300s)
-    R->>FS: load PRIOR_MINDMAP (旧的)
-    R->>AI: 拼 prompt, send (300KB)
-    AI-->>R: 新 mindmap JSON<br/>(可能创建新 initiative)
-    R->>FS: 写 mindmap.json<br/>+ 修复短 ids
+    R->>FS: hash check 新 sid 在里面 不同
+    R->>FS: cooldown check 假设 >300s
+    R->>FS: load PRIOR_MINDMAP 旧的
+    R->>AI: 拼 prompt send 300KB
+    AI-->>R: 新 mindmap JSON<br/>可能创建新 initiative
+    R->>FS: 写 mindmap.json<br/>修复短 ids
     R->>FS: 写 last_ai_run.epoch
     R->>FS: 重生成 mindmap.html
     R->>FS: rmdir lock
@@ -567,10 +567,10 @@ sequenceDiagram
     autonumber
     actor U as 用户
     participant B as Browser
-    participant J as JS (render-html.py)
+    participant J as Browser JS
     participant S as serve.py
     participant FS as cache/
-    participant R as refresh.sh<br/>(下一次触发)
+    participant R as refresh.sh later
     participant AI as claude -p
 
     U->>B: 点 task checkbox
@@ -666,14 +666,14 @@ sequenceDiagram
 
 ```mermaid
 flowchart LR
-    A["mindmap.json<br/>(round N)"] -- "瘦身后<br/>嵌入 prompt" --> B["PRIOR_MINDMAP<br/>block"]
+    A["mindmap.json<br/>(round N)"] -->|"瘦身后<br/>嵌入 prompt"| B["PRIOR_MINDMAP<br/>block"]
     C["sessions/*.json<br/>+ aggregate"] --> D["INPUT_SESSIONS<br/>block"]
     E["deleted_ids.json"] --> F["DELETED_IDS<br/>block"]
     B --> G["claude -p Haiku"]
     D --> G
     F --> G
     G --> H["mindmap.json<br/>(round N+1)"]
-    H -.下一轮.-> A
+    H -.->|"下一轮"| A
 
     style A fill:#fdd,color:#000
     style H fill:#dfd,color:#000
@@ -738,14 +738,14 @@ stateDiagram-v2
 
 ```mermaid
 graph LR
-    A1[refresh.sh 实例 A] -.竞争.-> L1["cache/refresh.lock.d<br/>(mkdir 锁)"]
-    A2[refresh.sh 实例 B] -.竞争.-> L1
-    L1 -- "拿到" --> S1[实例 A 跑完]
-    L1 -- "失败" --> S2[实例 B 立即退出]
+    A1["refresh.sh 实例 A"] -.->|竞争| L1["cache/refresh.lock.d<br/>(mkdir 锁)"]
+    A2["refresh.sh 实例 B"] -.->|竞争| L1
+    L1 -->|"拿到"| S1["实例 A 跑完"]
+    L1 -->|"失败"| S2["实例 B 立即退出"]
 
-    B1[serve.py /api/save] -.无锁.-> F1[user_overrides.json]
-    B2[refresh.sh apply_overrides] -.无锁.-> F1
-    F1 -.竞争窗口 ~100ms.-> R[Race: last-writer-wins]
+    B1["serve.py /api/save"] -.->|"无锁"| F1["user_overrides.json"]
+    B2["refresh.sh apply_overrides"] -.->|"无锁"| F1
+    F1 -.->|"竞争窗口 ~100ms"| R["Race: last-writer-wins"]
 
     style L1 fill:#dfd,color:#000
     style R fill:#fdd,color:#000

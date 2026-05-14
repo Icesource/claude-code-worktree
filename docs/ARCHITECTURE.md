@@ -19,18 +19,18 @@ runs **automatically** via hooks.
 
 ```mermaid
 flowchart LR
-    A["~/.claude/projects/<br/>*.jsonl<br/>(Claude Code raw log)"] --> B[extract.py]
+    A["~/.claude/projects/<br/>*.jsonl<br/>(Claude Code raw log)"] --> B["extract.py"]
     B --> C["cache/sessions/<br/>(per-session summary)"]
-    C --> D[aggregate.py]
+    C --> D["aggregate.py"]
     D --> E["cache/aggregate_input.json<br/>(200 sessions bundled)"]
     E --> F["claude -p<br/>Haiku 4.5"]
-    G["cache/mindmap.json<br/>(prior round)"] -.PRIOR_MINDMAP.-> F
+    G["cache/mindmap.json<br/>(prior round)"] -.->|PRIOR_MINDMAP| F
     F --> H["cache/mindmap.json<br/>(new round)"]
-    H --> R1[render.py - ANSI tree]
-    H --> R2[render-html.py - cards]
-    H --> R3[render-tree.py - markmap]
+    H --> R1["render.py — ANSI tree"]
+    H --> R2["render-html.py — cards"]
+    H --> R3["render-tree.py — markmap"]
     U["User clicks in UI<br/>(toggle / archive / delete)"] -.->|"POST /api/save"| OV["cache/user_overrides.json"]
-    OV -.merged into mindmap.json.-> H
+    OV -.->|"merged into mindmap.json"| H
 
     style F fill:#fff3a0,color:#000
     style H fill:#a8e6cf,color:#000
@@ -129,43 +129,43 @@ Who calls whom, who reads/writes what. **Solid line = direct call**,
 
 ```mermaid
 graph TD
-    install[install.sh] -.writes.-> set[~/.claude/settings.json]
-    install -.symlinks.-> sym[~/.local/bin/mindmap]
-    install -.copies.-> sc[~/.claude/commands/*.md]
-    install -.writes.-> la[~/Library/LaunchAgents/*.plist]
+    install["install.sh"] -.->|writes| set["~/.claude/settings.json"]
+    install -.->|symlinks| sym["~/.local/bin/mindmap"]
+    install -.->|copies| sc["~/.claude/commands/*.md"]
+    install -.->|writes| la["~/Library/LaunchAgents/*.plist"]
 
-    set -."Stop/SessionStart<br/>hook fires".-> bg[refresh-bg.sh]
-    la -."every 2h".-> bg
-    sym --> mm[mindmap]
+    set -.->|"Stop/SessionStart<br/>hook fires"| bg["refresh-bg.sh"]
+    la -.->|"every 2h"| bg
+    sym --> mm["mindmap"]
 
-    mm --> render[render.py]
-    mm --> rh[render-html.py]
-    mm --> rt[render-tree.py]
-    mm --> srv[serve.py]
-    mm --> diag[diagnose.py]
-    mm --> rfsh[refresh.sh]
+    mm --> render["render.py"]
+    mm --> rh["render-html.py"]
+    mm --> rt["render-tree.py"]
+    mm --> srv["serve.py"]
+    mm --> diag["diagnose.py"]
+    mm --> rfsh["refresh.sh"]
 
-    bg --> rec[record-location.py]
+    bg --> rec["record-location.py"]
     bg --> rfsh
 
-    rfsh --> ext[extract.py]
-    rfsh --> agg[aggregate.py]
-    rfsh -.reads.-> pmpt[prompts/classify.md]
+    rfsh --> ext["extract.py"]
+    rfsh --> agg["aggregate.py"]
+    rfsh -.->|reads| pmpt["prompts/classify.md"]
     rfsh --> rh
     rfsh --> rt
-    rfsh -.spawns.-> claude["claude -p<br/>Haiku 4.5"]
+    rfsh -.->|spawns| claude["claude -p<br/>Haiku 4.5"]
 
-    srv -.spawns.-> rh
-    srv -.spawns.-> rt
-    srv -.spawns.-> rfsh
-    srv -.zellij action.-> zj[Zellij]
+    srv -.->|spawns| rh
+    srv -.->|spawns| rt
+    srv -.->|spawns| rfsh
+    srv -.->|"zellij action"| zj["Zellij"]
 
-    ext -.reads.-> jl["~/.claude/projects/<br/>*.jsonl"]
-    ext -.writes.-> sess[cache/sessions/]
-    agg -.reads.-> sess
-    agg -.writes.-> agi[cache/aggregate_input.json]
-    rec -.writes.-> loc[cache/session_locations.json]
-    rfsh -.writes.-> mj[cache/mindmap.json]
+    ext -.->|reads| jl["~/.claude/projects/<br/>*.jsonl"]
+    ext -.->|writes| sess["cache/sessions/"]
+    agg -.->|reads| sess
+    agg -.->|writes| agi["cache/aggregate_input.json"]
+    rec -.->|writes| loc["cache/session_locations.json"]
+    rfsh -.->|writes| mj["cache/mindmap.json"]
 
     style mj fill:#a8e6cf,color:#000
     style claude fill:#fff3a0,color:#000
@@ -186,34 +186,34 @@ its 11 stages:
 
 ```mermaid
 flowchart TD
-    Start([refresh.sh starts<br/>echo [hook] timestamp]) --> Lock{mkdir<br/>refresh.lock.d<br/>ok?}
-    Lock -- "fail" --> Stale{stale<br/>>660s?}
-    Stale -- "no" --> Exit1([exit 0:<br/>another running])
-    Stale -- "yes" --> Recover[rm + take lock]
+    Start(["refresh.sh starts<br/>echo hook timestamp"]) --> Lock{"mkdir<br/>refresh.lock.d<br/>ok?"}
+    Lock -- "fail" --> Stale{"stale<br/>>660s?"}
+    Stale -- "no" --> Exit1(["exit 0:<br/>another running"])
+    Stale -- "yes" --> Recover["rm + take lock"]
     Lock -- "ok" --> ApplyOv
     Recover --> ApplyOv
 
     ApplyOv["Stage 1: apply user_overrides<br/>1. flip task done<br/>2. remove deleted_tasks<br/>3. remove archived initiatives<br/>4. remove deleted_ids initiatives<br/>(all in-place edit mindmap.json)"] --> Extract
 
-    Extract["Stage 2: extract.py<br/>incrementally read ~/.claude/projects/*.jsonl<br/>update cache/sessions/<sid>.json"] --> Agg
+    Extract["Stage 2: extract.py<br/>incrementally read ~/.claude/projects/*.jsonl<br/>update cache/sessions/&lt;sid&gt;.json"] --> Agg
 
     Agg["Stage 3: aggregate.py<br/>filter is_automation, sort, cap 200<br/>write aggregate_input.json"] --> Empty
 
-    Empty{n_sessions == 0?}
-    Empty -- "yes" --> EmptyOut[write empty mindmap.json]
-    EmptyOut --> Done0([exit 0])
+    Empty{"n_sessions == 0?"}
+    Empty -- "yes" --> EmptyOut["write empty mindmap.json"]
+    EmptyOut --> Done0(["exit 0"])
     Empty -- "no" --> Hash
 
     Hash["Stage 4: hash check<br/>sha256(aggregate_input.json)<br/>vs last_input.sha256"] --> HashMatch
-    HashMatch{same?}
+    HashMatch{"same?"}
     HashMatch -- "yes" --> BumpOnly["just bump mindmap.json<br/>generated_at + regen HTML"]
-    BumpOnly --> Done1([exit 0: skip-hash])
+    BumpOnly --> Done1(["exit 0: skip-hash"])
 
     HashMatch -- "no" --> Cool
 
     Cool["Stage 5: cooldown gate<br/>now - last_ai_run.epoch<br/>vs COOLDOWN_SECS=300"] --> CoolPass
-    CoolPass{cooldown cleared?<br/>or FORCE=1?}
-    CoolPass -- "no" --> Done2([exit 0: skip-cooldown])
+    CoolPass{"cooldown cleared?<br/>or FORCE=1?"}
+    CoolPass -- "no" --> Done2(["exit 0: skip-cooldown"])
     CoolPass -- "yes" --> Lang
 
     Lang["Stage 6: load language<br/>read cache/config.json"] --> Prior
@@ -223,9 +223,9 @@ flowchart TD
 
     AI["Stage 10: claude -p<br/>Haiku 4.5<br/>--disallowedTools<br/>--output-format json"] --> Parse
 
-    Parse["Stage 11: parse output<br/>1. extract JSON from ```fence<br/>2. repair short session_ids<br/>(prefix match aggregate_input)<br/>3. write mindmap.json<br/>4. write last_ai_run.epoch<br/>5. write last_input.sha256<br/>6. log DIFF vs prior"] --> Render
+    Parse["Stage 11: parse output<br/>1. extract JSON from fence<br/>2. repair short session_ids<br/>(prefix match aggregate_input)<br/>3. write mindmap.json<br/>4. write last_ai_run.epoch<br/>5. write last_input.sha256<br/>6. log DIFF vs prior"] --> Render
 
-    Render["Regen HTML<br/>render-html.py + render-tree.py"] --> DoneOK([exit 0:<br/>'OK ran AI'])
+    Render["Regen HTML<br/>render-html.py + render-tree.py"] --> DoneOK(["exit 0:<br/>OK ran AI"])
 
     style AI fill:#fff3a0,color:#000
     style ApplyOv fill:#ffd3b6,color:#000
@@ -337,14 +337,14 @@ When does refresh.sh actually invoke AI? See the decision tree:
 
 ```mermaid
 flowchart TD
-    Start[refresh.sh starts] --> Lock{lock available?}
-    Lock -- "no" --> Skip1[skip locked<br/>another running]
-    Lock -- "yes" --> Force{CLAUDE_WORKTREE_<br/>FORCE=1?<br/>--refresh triggered}
-    Force -- "yes" --> Run[**invoke AI**]
-    Force -- "no" --> Hash{aggregate input<br/>hash same?}
-    Hash -- "yes" --> Skip2[skip hash-same<br/>just bump timestamp]
-    Hash -- "no" --> Marker{last_ai_run.epoch<br/>< 300s ago?}
-    Marker -- "yes" --> Skip3[skip cooldown<br/>too soon]
+    Start["refresh.sh starts"] --> Lock{"lock available?"}
+    Lock -- "no" --> Skip1["skip locked<br/>another running"]
+    Lock -- "yes" --> Force{"CLAUDE_WORKTREE_<br/>FORCE=1?<br/>(--refresh triggered)"}
+    Force -- "yes" --> Run["invoke AI"]
+    Force -- "no" --> Hash{"aggregate input<br/>hash same?"}
+    Hash -- "yes" --> Skip2["skip hash-same<br/>just bump timestamp"]
+    Hash -- "no" --> Marker{"last_ai_run.epoch<br/>&lt; 300s ago?"}
+    Marker -- "yes" --> Skip3["skip cooldown<br/>too soon"]
     Marker -- "no" --> Run
 
     style Run fill:#a8e6cf,color:#000
@@ -427,15 +427,15 @@ sequenceDiagram
     participant L as record-location.py
     participant R as refresh.sh
     participant E as extract.py
-    participant AI as claude -p (Haiku)
+    participant AI as Haiku via claude -p
     participant FS as cache/
 
     U->>CC: claude<br/>open new session
-    CC->>CC: create sid.jsonl<br/>(empty)
+    CC->>CC: create sid.jsonl (empty)
     CC->>CC: Trigger SessionStart hook
-    CC-->>H: bash refresh-bg.sh<br/>(stdin: {session_id, cwd})
-    H->>L: read stdin + env<br/>(ZELLIJ_PANE_ID etc.)
-    L->>FS: write session_locations.json[sid]
+    CC-->>H: bash refresh-bg.sh<br/>stdin includes session_id and cwd
+    H->>L: read stdin and env<br/>incl ZELLIJ_PANE_ID
+    L->>FS: write session_locations.json entry for sid
     H->>R: fork + detach
     H-->>CC: return immediately
 
@@ -478,10 +478,10 @@ sequenceDiagram
     autonumber
     actor U as User
     participant B as Browser
-    participant J as JS (in mindmap.html)
+    participant J as Browser JS
     participant S as serve.py
     participant FS as cache/
-    participant R as refresh.sh<br/>(next trigger)
+    participant R as refresh.sh (later)
     participant AI as claude -p
 
     U->>B: click task checkbox
@@ -577,14 +577,14 @@ run — it's **letting AI incrementally update on top of its last output**.
 
 ```mermaid
 flowchart LR
-    A["mindmap.json<br/>(round N)"] -- "slimmed,<br/>embedded in prompt" --> B["PRIOR_MINDMAP<br/>block"]
+    A["mindmap.json<br/>(round N)"] -->|"slimmed,<br/>embedded in prompt"| B["PRIOR_MINDMAP<br/>block"]
     C["sessions/*.json<br/>+ aggregate"] --> D["INPUT_SESSIONS<br/>block"]
     E["deleted_ids.json"] --> F["DELETED_IDS<br/>block"]
     B --> G["claude -p Haiku"]
     D --> G
     F --> G
     G --> H["mindmap.json<br/>(round N+1)"]
-    H -.next round.-> A
+    H -.->|"next round"| A
 
     style A fill:#fdd,color:#000
     style H fill:#dfd,color:#000
@@ -650,14 +650,14 @@ Current locking is minimal — fine for single-user, single-host.
 
 ```mermaid
 graph LR
-    A1[refresh.sh instance A] -.compete.-> L1["cache/refresh.lock.d<br/>(mkdir lock)"]
-    A2[refresh.sh instance B] -.compete.-> L1
-    L1 -- "got" --> S1[instance A runs]
-    L1 -- "failed" --> S2[instance B exits immediately]
+    A1["refresh.sh instance A"] -.->|compete| L1["cache/refresh.lock.d<br/>(mkdir lock)"]
+    A2["refresh.sh instance B"] -.->|compete| L1
+    L1 -->|"got"| S1["instance A runs"]
+    L1 -->|"failed"| S2["instance B exits immediately"]
 
-    B1[serve.py /api/save] -.no lock.-> F1[user_overrides.json]
-    B2[refresh.sh apply_overrides] -.no lock.-> F1
-    F1 -.race window ~100ms.-> R[Race: last-writer-wins]
+    B1["serve.py /api/save"] -.->|"no lock"| F1["user_overrides.json"]
+    B2["refresh.sh apply_overrides"] -.->|"no lock"| F1
+    F1 -.->|"race window ~100ms"| R["Race: last-writer-wins"]
 
     style L1 fill:#dfd,color:#000
     style R fill:#fdd,color:#000
