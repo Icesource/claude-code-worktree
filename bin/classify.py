@@ -65,7 +65,7 @@ MAX_HOT = int(os.environ.get("CLAUDE_WORKTREE_MAX_HOT", "120"))
 # and rarely add real signal. Set to 1 to disable filtering.
 MIN_TURNS = int(os.environ.get("CLAUDE_WORKTREE_MIN_TURNS", "2"))
 
-# claude -p settings (mirror refresh.sh)
+# claude -p settings
 CLAUDE_TIMEOUT_SECS = int(os.environ.get("CLAUDE_WORKTREE_TIMEOUT", "600"))
 CLAUDE_MODEL = os.environ.get("CLAUDE_WORKTREE_MODEL", "claude-haiku-4-5-20251001")
 
@@ -188,7 +188,7 @@ def archived_ids_on_disk() -> set[str]:
     return out
 
 
-# ---------- apply user overrides (port from refresh.sh) --------------------
+# ---------- apply user overrides ------------------------------------------
 
 
 def apply_user_overrides_inplace(mindmap: dict) -> int:
@@ -373,12 +373,17 @@ def build_prompt(hot: list[tuple[str, dict, str, str]],
 def call_claude(prompt: str) -> tuple[dict | None, str, int, float]:
     t_start = time.time()
     try:
+        # --no-session-persistence: see summarize.py for the full
+        # reasoning. Required to prevent self-recursion via Stop hook.
+        # --max-budget-usd is per-call: a normal classify is ~$0.17 with
+        # ~120 hot summaries, $2.50 covers worst-case w/ retries.
         argv = [
             "perl", "-e", "alarm shift @ARGV; exec @ARGV",
             str(CLAUDE_TIMEOUT_SECS),
-            "claude", "-p",
+            "claude", "--no-session-persistence", "-p",
             "--model", CLAUDE_MODEL,
             "--output-format", "json",
+            "--max-budget-usd", "2.50",
             "--disallowedTools", "Bash Edit Write Read Glob Grep",
         ]
         result = subprocess.run(
@@ -554,7 +559,7 @@ def regen_html() -> None:
 
 
 def emit_diff(prior: dict | None, new: dict) -> None:
-    """Print a structured DIFF for the log, same format as refresh.sh."""
+    """Print a structured DIFF for the log."""
     def index(d):
         out = {}
         for ws in (d.get("workspaces") or []):

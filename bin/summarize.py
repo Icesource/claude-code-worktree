@@ -56,7 +56,7 @@ MAX_TURNS = 12              # user+assistant pairs
 MAX_CHARS_PER_TURN = 8000   # one turn text cap
 MAX_TOTAL_TURNS_CHARS = 30000  # total budget for <turns> block
 
-# Haiku invocation defaults (mirror refresh.sh)
+# Haiku invocation defaults
 CLAUDE_TIMEOUT_SECS = int(os.environ.get("CLAUDE_WORKTREE_TIMEOUT", "120"))
 CLAUDE_MODEL = os.environ.get("CLAUDE_WORKTREE_MODEL", "claude-haiku-4-5-20251001")
 
@@ -244,12 +244,21 @@ def call_claude(prompt: str) -> tuple[dict | None, str, int, float]:
     t_start = time.time()
     try:
         # macOS lacks `timeout`; perl alarm is the portable trick.
+        # --no-session-persistence prevents the nested call from being
+        # logged as a new jsonl, which is what previously made extract.py
+        # treat it as a fresh "user session" and re-summarize it on the
+        # next hook — the self-recursion that ate $51 on 2026-05-14.
+        # (We tried --bare too but it disables OAuth, requiring an
+        # ANTHROPIC_API_KEY env var; not viable for OAuth-only setups.)
+        # --max-budget-usd is a per-call hard ceiling; a normal summarize
+        # is ~$0.03, $0.50 is generous and stops pathological blowups.
         argv = [
             "perl", "-e", "alarm shift @ARGV; exec @ARGV",
             str(CLAUDE_TIMEOUT_SECS),
-            "claude", "-p",
+            "claude", "--no-session-persistence", "-p",
             "--model", CLAUDE_MODEL,
             "--output-format", "json",
+            "--max-budget-usd", "0.50",
             "--disallowedTools", "Bash Edit Write Read Glob Grep",
         ]
         result = subprocess.run(

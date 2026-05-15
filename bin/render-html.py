@@ -279,10 +279,10 @@ def load_archived_items() -> list:
     """
     Load all archived initiatives from cache/archive/<workspace>/<id>.json.
 
-    These were physically removed from mindmap.json by refresh.sh but the
-    full initiative payload is preserved on disk. The HTML needs them so
-    the archive zone keeps showing items even after the AI refresh that
-    consumed them.
+    These were physically removed from mindmap.json by the classifier but
+    the full initiative payload is preserved on disk. The HTML needs them
+    so the archive zone keeps showing items even after the AI refresh
+    that consumed them.
 
     Returns list of {ws_name, ws_cwd, init, archived_at} entries.
     """
@@ -1016,7 +1016,7 @@ footer.card-actions button.danger:hover { background: var(--red-bg); border-colo
     });
 
     // Also pull in items persisted to cache/archive/ (already swept from
-    // mindmap.json by refresh.sh). They are in initById tagged as `persisted`.
+    // mindmap.json by the classifier). They are in initById tagged as `persisted`.
     for (const id in initById) {
       if (seenInArchive.has(id) || isDeleted(id)) continue;
       const rec = initById[id];
@@ -1809,7 +1809,7 @@ footer.card-actions button.danger:hover { background: var(--red-bg); border-colo
   if (!SERVER_MODE) setInterval(pingHelper, 30000);
 
   // ---------- Data freshness — silent hot-refresh (server mode) ---------
-  // When refresh.sh runs in the background, mindmap.json changes. We poll
+  // When the pipeline runs in the background, mindmap.json changes. We poll
   // /api/data every 8s and swap in the new data + re-render silently.
   // No banner, no reload — the page just updates in place. Scroll position
   // is preserved across re-renders.
@@ -1874,7 +1874,7 @@ footer.card-actions button.danger:hover { background: var(--red-bg); border-colo
         if (r.ok || r.status === 202) toast(I18N.refresh_started);
         else toast('refresh failed: ' + r.status);
       } catch (e) { toast('refresh failed: ' + e.message); }
-      // Re-enable after a beat (refresh.sh takes ~30-120s)
+      // Re-enable after a beat (pipeline takes ~30-120s)
       setTimeout(() => { $manualRefresh.disabled = false; }, 5000);
     });
   } else {
@@ -1959,7 +1959,7 @@ def render_html(data: dict, L: dict, lang: str) -> str:
 def main() -> int:
     if not MINDMAP_FILE.exists():
         print(f"No mindmap cache found at {MINDMAP_FILE}", file=sys.stderr)
-        print("Run: bash bin/refresh.sh", file=sys.stderr)
+        print("Run: mindmap --refresh", file=sys.stderr)
         return 1
     data = json.loads(MINDMAP_FILE.read_text())
     lang = get_lang()

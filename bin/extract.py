@@ -102,11 +102,20 @@ PROMPT_TRIM = 400
 # from the full text. 1500 fits comfortably in the prompt while capturing
 # meaningful technical reasoning.
 SUMMARY_TRIM = 1500
-# Self-referential detection: refresh.sh feeds classify.md to `claude -p`,
-# which in turn creates a new jsonl. We must skip these so the tool doesn't
-# "see itself" and pollute the classifier input.
+# Self-referential detection: refresh.sh / summarize.py / classify.py each
+# feed a prompt template to `claude -p`, which CC itself logs as a new
+# session (new jsonl). Those self-invocations must be skipped so the tool
+# doesn't summarize-its-own-summarize-prompt in an infinite loop. Match
+# the leading sentence of every prompt template under prompts/.
+#
+# Marker miss = silent runaway cost: on 2026-05-14 the P14 cutover renamed
+# both prompts but left the old marker, so 1642 self-recursive sessions
+# accumulated overnight at $0.03 each (~$51 lost). Update this list any
+# time a prompt template is added or its opening line is reworded.
 AUTOMATION_PROMPT_MARKERS = (
-    "You are analyzing a developer's Claude Code session history",
+    "You are analyzing a developer's Claude Code session history",   # legacy P13 classify
+    "You are summarizing a single Claude Code session",              # Layer 1 summarize
+    "You are doing cross-session classification",                    # Layer 2 classify
 )
 
 

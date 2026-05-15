@@ -1,7 +1,5 @@
 #!/usr/bin/env bash
-# New 3-layer pipeline orchestrator (per DD-002 §4).
-#
-# Replaces the monolithic bin/refresh.sh. Called by:
+# 3-layer pipeline orchestrator (per DD-002 §4). Called by:
 #   - bin/refresh-bg.sh on every Stop / SessionStart hook
 #   - bin/mindmap --refresh (with FORCE_CLASSIFY=1 to bypass dirty
 #     gating on Layer 2)

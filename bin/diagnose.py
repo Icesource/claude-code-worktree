@@ -23,10 +23,10 @@ PROJECTS_DIR = HOME / ".claude" / "projects"
 REPO_ROOT = Path(__file__).resolve().parent.parent
 CACHE_DIR = REPO_ROOT / "cache"
 SESSIONS_DIR = CACHE_DIR / "sessions"
-AGG_FILE = CACHE_DIR / "aggregate_input.json"
+SUMMARIES_DIR = CACHE_DIR / "summaries"
 MINDMAP_FILE = CACHE_DIR / "mindmap.json"
-OUTPUT_FILE = MINDMAP_FILE  # alias used in cooldown calc
-AI_MARKER = CACHE_DIR / "last_ai_run.epoch"
+COST_LOG = CACHE_DIR / "cost_log.jsonl"
+KILL_SWITCH = CACHE_DIR / ".refresh-disabled"
 
 USE_COLOR = sys.stdout.isatty() and os.environ.get("NO_COLOR") is None
 
@@ -176,23 +176,28 @@ def main() -> int:
         print(info("Stage 1 hasn't seen this session yet — hook may not have run after the new session."))
         print(info(f"Try: bash {REPO_ROOT}/bin/extract.py"))
 
-    # ---- 3. aggregate output --------------------------------------------
-    print("\n" + head("[3] Stage 2: aggregate.py (cache/aggregate_input.json)"))
-    in_agg = False
-    if AGG_FILE.exists():
-        try:
-            agg = json.loads(AGG_FILE.read_text())
-            in_agg = any(e.get("session_id") == target_sid for e in agg)
-            print(info(f"aggregate has {len(agg)} entries · last write {humanize_age(AGG_FILE.stat().st_mtime)}"))
-        except json.JSONDecodeError:
-            print(bad("aggregate_input.json corrupt"))
+    # ---- 3. Layer 1 summary ---------------------------------------------
+    print("\n" + head("[3] Stage 2: Layer 1 summarize (cache/summaries/)"))
+    summary_md = SUMMARIES_DIR / f"{target_sid}.md"
+    summary_md_ok = False
+    if summary_md.exists():
+        size = summary_md.stat().st_size
+        age = humanize_age(summary_md.stat().st_mtime)
+        print(ok(f"summary written: {summary_md.name} · {size}B · {age}"))
+        summary_md_ok = True
     else:
-        print(bad("aggregate_input.json missing"))
-    if in_agg:
-        print(ok("session_id IS in the latest aggregate input"))
-    else:
-        print(bad("session_id is NOT in the latest aggregate input"))
-        print(info("Causes: extract didn't see it yet, OR it was filtered (user_message_count<1, or is_automation)"))
+        # Determine why: filtered, or not yet processed
+        if summary_file.exists():
+            sj = json.loads(summary_file.read_text())
+            if sj.get("is_automation"):
+                print(warn("skipped: session flagged is_automation (self-recursive AI call)"))
+            elif (sj.get("user_message_count", 0) or 0) < 1:
+                print(warn("skipped: user_message_count < 1 (no real prompts yet)"))
+            else:
+                print(bad("Layer 1 hasn't summarized this session yet"))
+                print(info(f"Try: python3 {REPO_ROOT}/bin/summarize.py {target_sid}"))
+        else:
+            print(bad("waiting on Stage 1 (extract); Layer 1 will run after"))
 
     # ---- 4. mindmap.json ------------------------------------------------
     print("\n" + head("[4] Stage 3: AI classification (cache/mindmap.json)"))
@@ -223,33 +228,42 @@ def main() -> int:
     else:
         print(bad("mindmap.json missing — never ran a refresh"))
 
-    # ---- 5. AI run history (real, not mindmap.json mtime) ---------------
-    print("\n" + head("[5] Last real AI run"))
-    cooldown = int(os.environ.get("CLAUDE_WORKTREE_COOLDOWN_SECS") or 300)
-    if AI_MARKER.exists():
-        try:
-            last_epoch = int(AI_MARKER.read_text().strip() or "0")
-        except (OSError, ValueError):
-            last_epoch = 0
-        age_s = max(0, int(datetime.now().timestamp()) - last_epoch)
-        if age_s < 60:
-            age_str = f"{age_s}s ago"
-        elif age_s < 3600:
-            age_str = f"{age_s // 60}m {age_s % 60}s ago"
-        elif age_s < 86400:
-            age_str = f"{age_s // 3600}h {(age_s % 3600) // 60}m ago"
-        else:
-            age_str = f"{age_s // 86400}d {(age_s % 86400) // 3600}h ago"
-        if age_s < cooldown:
-            remaining = cooldown - age_s
-            print(warn(f"in cooldown: AI ran {age_str} (<{cooldown}s)"))
-            print(info(f"next hook-triggered AI run allowed in {remaining}s"))
-        else:
-            print(ok(f"cooldown clear: AI ran {age_str} ({age_s}s >= {cooldown}s)"))
+    # ---- 5. Kill switch + recent AI activity (from cost_log.jsonl) -------
+    print("\n" + head("[5] Pipeline health"))
+    if KILL_SWITCH.exists():
+        print(bad(f"kill switch ENGAGED: {KILL_SWITCH}"))
+        print(info(f"To re-enable: rm {KILL_SWITCH}"))
     else:
-        print(warn(f"no AI run marker yet ({AI_MARKER} missing) — has refresh.sh ever finished an AI call?"))
+        print(ok("kill switch not set; pipeline allowed to run"))
 
-    # ---- 6. Recent hook & refresh outcomes ------------------------------
+    last_classify = last_summarize = None
+    today_iso = datetime.now(timezone.utc).strftime('%Y-%m-%d')
+    today_n = today_cost = 0.0
+    if COST_LOG.exists():
+        try:
+            for line in COST_LOG.read_text().splitlines():
+                if not line.strip(): continue
+                d = json.loads(line)
+                at = d.get('at') or ''
+                if at.startswith(today_iso):
+                    today_n += 1
+                    today_cost += d.get('cost_usd') or 0
+                layer = d.get('layer')
+                if layer == 'classify':
+                    last_classify = at
+                elif layer == 'summarize':
+                    last_summarize = at
+        except Exception as e:
+            print(warn(f"cost_log read failed: {e}"))
+        print(info(f"today: {today_n} calls / ${today_cost:.2f}"))
+        if last_summarize:
+            print(info(f"last summarize: {last_summarize}"))
+        if last_classify:
+            print(info(f"last classify:  {last_classify}"))
+    else:
+        print(warn(f"cost_log missing ({COST_LOG}) — pipeline has never recorded an AI call"))
+
+    # ---- 6. Recent hook outcomes ----------------------------------------
     print("\n" + head("[6] Recent hook outcomes"))
     lp = log_path()
     print(info(f"log: {lp}"))
@@ -257,13 +271,11 @@ def main() -> int:
     if not tail:
         print(warn("log empty or unreadable"))
     else:
-        # Group lines by [hook] / legacy [refresh-bg invoked] markers.
-        # Each group is one invocation.
+        # Each invocation starts with a [hook] line.
         groups: list[list[str]] = []
         cur: list[str] = []
         for line in tail:
-            is_hook_start = "[hook]" in line or "refresh-bg invoked" in line
-            if is_hook_start:
+            if "[hook]" in line:
                 if cur:
                     groups.append(cur)
                 cur = [line]
@@ -271,36 +283,27 @@ def main() -> int:
                 cur.append(line)
         if cur:
             groups.append(cur)
-        # Drop any leading group that doesn't start with a hook marker
-        groups = [g for g in groups if g and ("[hook]" in g[0] or "refresh-bg invoked" in g[0])]
+        groups = [g for g in groups if g and "[hook]" in g[0]]
         # Summarize the last 8 invocations
         for grp in groups[-8:]:
             hook_line = grp[0]
-            # Classify outcome
             text = "\n".join(grp)
-            if "SKIP-COOLDOWN" in text:
-                outcome = c(YELLOW, "SKIP cooldown")
-            elif "input unchanged" in text:
-                outcome = c(DIM, "skip hash-same")
-            elif "no sessions" in text:
-                outcome = c(DIM, "skip no-sessions")
-            elif "claude -p failed" in text:
-                outcome = c(RED, "FAIL")
-            elif "DIFF vs prior" in text:
-                outcome = c(GREEN, "OK ran AI")
+            if "Layer 1: 0 session(s) dirty" in text and "Layer 2: nothing new, skip" in text:
+                outcome = c(DIM, "noop (nothing dirty)")
+            elif "wrote" in text and ".md" in text and "Layer 2" in text:
+                outcome = c(GREEN, "OK summarized + classified")
             elif "wrote" in text and "initiatives" in text:
-                outcome = c(GREEN, "OK ran AI")
-            elif "another refresh is running" in text:
+                outcome = c(GREEN, "OK ran classify")
+            elif "AI call failed" in text or "claude -p failed" in text:
+                outcome = c(RED, "FAIL")
+            elif "busy → pending" in text:
                 outcome = c(DIM, "skip locked")
             else:
                 outcome = c(DIM, "?")
-            # Pull timestamp out of hook_line — handle both old/new formats
             ts = ""
             parts = hook_line.split()
             if len(parts) >= 2 and parts[0] == "[hook]":
                 ts = parts[1]
-            elif len(parts) >= 2 and parts[0].startswith("[") and parts[0].endswith("]"):
-                ts = parts[0].strip("[]")
             print(f"  · {ts:<28}  {outcome}")
             # If AI ran, show the DIFF lines
             for ln in grp:
@@ -309,19 +312,23 @@ def main() -> int:
 
     # ---- 7. Verdict + actions -------------------------------------------
     print("\n" + head("[7] Verdict"))
-    if not (stop_has and ss_has):
-        print(bad("Hooks not installed — none of the pipeline will fire on Claude Code events."))
+    if KILL_SWITCH.exists():
+        print(bad("Pipeline kill switch is engaged — Stop hooks exit immediately."))
+        print(info(f"→ Re-enable: rm {KILL_SWITCH}"))
+    elif not (stop_has and ss_has):
+        print(bad("Hooks not installed — pipeline won't fire on Claude Code events."))
+        print(info(f"→ Re-install: bash {REPO_ROOT}/bin/install.sh"))
     elif not summary_file.exists():
         print(warn("Stage 1 (extract) hasn't recorded this session yet."))
-        print(info(f"→ Manually run: python3 {REPO_ROOT}/bin/extract.py && python3 {REPO_ROOT}/bin/aggregate.py > /dev/null"))
-        print(info(f"→ Then: mindmap --refresh"))
-    elif not in_agg:
-        print(warn("Session is extracted but filtered out (user_message_count<1 or is_automation)."))
+        print(info(f"→ Manually run: python3 {REPO_ROOT}/bin/extract.py"))
+        print(info(f"→ Then:        mindmap --refresh"))
+    elif not summary_md_ok:
+        print(warn("Stage 2 (Layer 1 summarize) hasn't summarized this session."))
+        print(info("Causes: is_automation, user_message_count<1, or not yet processed."))
     elif not (MINDMAP_FILE.exists() and any(target_sid in (i.get('sessions') or []) for ws in (json.loads(MINDMAP_FILE.read_text()).get('workspaces') or []) for i in (ws.get('initiatives') or []))):
-        # Session in aggregate but not in mindmap → AI hasn't run with this session yet
-        print(warn("Session is ready for AI but isn't in mindmap.json yet."))
-        print(info("Cause: AI didn't run since this session was extracted (likely cooldown skipped it)."))
-        print(info(f"→ Force AI now: mindmap --refresh"))
+        print(warn("Session is summarized but isn't in mindmap.json yet."))
+        print(info("Cause: Layer 2 (classify) hasn't run with this summary yet."))
+        print(info(f"→ Force classify: mindmap --refresh"))
     else:
         print(ok("All stages green — this session is classified."))
 

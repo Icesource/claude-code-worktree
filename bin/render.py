@@ -52,7 +52,7 @@ LOCALE = {
     "zh-CN": {
         "header": "Claude Code 工作图",
         "generated": "生成于",
-        "no_projects": "  （还没有项目数据 —— 运行 bin/refresh.sh）",
+        "no_projects": "  （还没有项目数据 —— 运行 mindmap --refresh）",
         "progress": "进度",
         "tasks": "任务",
         "archived_section": "已归档",
@@ -73,7 +73,7 @@ LOCALE = {
     "en": {
         "header": "Claude Code Worktree",
         "generated": "generated",
-        "no_projects": "  (no projects — run bin/refresh.sh)",
+        "no_projects": "  (no projects — run mindmap --refresh)",
         "progress": "progress",
         "tasks": "tasks",
         "archived_section": "archived",
@@ -401,8 +401,7 @@ def render(data: dict) -> str:
 def main() -> int:
     if not MINDMAP_FILE.exists():
         print(
-            c(YELLOW, L["no_cache"])
-            + f"\n  bash {REPO_ROOT}/bin/refresh.sh",
+            c(YELLOW, L["no_cache"]) + "\n  mindmap --refresh",
             file=sys.stderr,
         )
         return 1

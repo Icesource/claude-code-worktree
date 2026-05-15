@@ -46,7 +46,6 @@ DELETED_JSON = CACHE_DIR / "deleted_ids.json"
 ARCHIVE_DIR = CACHE_DIR / "archive"
 RENDER_HTML = REPO_ROOT / "bin" / "render-html.py"
 RENDER_TREE = REPO_ROOT / "bin" / "render-tree.py"
-REFRESH_SH = REPO_ROOT / "bin" / "refresh.sh"
 PIPELINE_RUN = REPO_ROOT / "bin" / "pipeline-run.sh"
 
 PORTS = [9876, 9877, 9878]
@@ -105,9 +104,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def _maybe_regen_html(self, path: Path) -> None:
         """If serving mindmap.html / mindmap-tree.html, regenerate it when
-        the source JSON is newer. Keeps the page automatically in sync with
-        the underlying data even if the user (or refresh.sh) bumped the
-        JSON without re-running render-html."""
+        the source JSON is newer. Keeps the page automatically in sync
+        with the underlying data even if the pipeline bumped the JSON
+        without re-running render-html."""
         try:
             if not MINDMAP_JSON.exists():
                 return
@@ -314,33 +313,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_refresh(self, body: dict):
         """Kick off the AI pipeline in the background. Non-blocking.
-
-        Routes to bin/pipeline-run.sh (new 3-layer pipeline) unless the
-        legacy fallback is requested via CLAUDE_WORKTREE_LEGACY_PIPELINE.
-        """
-        env = os.environ.copy()
-        legacy = env.get("CLAUDE_WORKTREE_LEGACY_PIPELINE") == "1"
-
-        if legacy:
-            if not REFRESH_SH.exists():
-                return self._reply(503, {"error": "refresh.sh missing"})
-            if body.get("force"):
-                env["CLAUDE_WORKTREE_FORCE"] = "1"
-            argv = ["bash", str(REFRESH_SH)]
-        else:
-            if not PIPELINE_RUN.exists():
-                return self._reply(503, {"error": "pipeline-run.sh missing"})
-            # Sweep dirty + always trigger Layer 2 (this is the "manual
-            # refresh" semantics: user clicked a button, they want a result)
-            argv = ["bash", str(PIPELINE_RUN), "--all-dirty", "--force-classify"]
+        Sweeps any dirty sessions through Layer 1 and forces Layer 2 to
+        run — manual-refresh semantics: the user clicked the button, they
+        want a fresh classification."""
+        if not PIPELINE_RUN.exists():
+            return self._reply(503, {"error": "pipeline-run.sh missing"})
+        argv = ["bash", str(PIPELINE_RUN), "--all-dirty", "--force-classify"]
         try:
             subprocess.Popen(
-                argv, env=env,
+                argv, env=os.environ.copy(),
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
             )
             return self._reply(202, {"ok": True,
-                                     "note": "pipeline started in background",
-                                     "legacy": legacy})
+                                     "note": "pipeline started in background"})
         except Exception as e:
             return self._reply(500, {"error": str(e)})
 

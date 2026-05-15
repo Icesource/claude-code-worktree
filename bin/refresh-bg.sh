@@ -3,10 +3,7 @@
 # SessionStart) and from launchd. Returns immediately so the hook
 # never blocks the user.
 #
-# Forks one of:
-#   bin/pipeline-run.sh --sid <session-id>     (new 3-layer pipeline, default)
-#   bin/refresh.sh                              (legacy monolith;
-#                                                set CLAUDE_WORKTREE_LEGACY_PIPELINE=1)
+# Forks bin/pipeline-run.sh with the current session id.
 #
 # Also captures the current Claude Code session's terminal location
 # (Zellij/tmux pane) into cache/session_locations.json — used by the
@@ -15,6 +12,13 @@
 set -u
 
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+
+# Kill switch. If this flag file exists, exit immediately and do no
+# AI work. Used to halt the pipeline when cost runs hot. Remove the
+# file (`rm cache/.refresh-disabled`) to re-enable.
+if [ -f "$REPO_ROOT/cache/.refresh-disabled" ]; then
+  exit 0
+fi
 
 # Platform-aware log location.
 if [ "$(uname)" = "Darwin" ]; then
@@ -48,21 +52,13 @@ printf '%s' "$PAYLOAD" | python3 "$REPO_ROOT/bin/record-location.py" 2>>"$LOG" |
 (
   echo "[hook] $(date -Iseconds) refresh-bg fired (pid=$$, sid=${SID:-?})" >> "$LOG"
 
-  if [ "${CLAUDE_WORKTREE_LEGACY_PIPELINE:-}" = "1" ]; then
-    # Legacy single-process refresh (kept for one bake-in week per
-    # DD-002 §10.1 Phase 5).
-    bash "$REPO_ROOT/bin/refresh.sh" >> "$LOG" 2>&1
+  if [ -n "$SID" ]; then
+    bash "$REPO_ROOT/bin/pipeline-run.sh" --sid "$SID" >> "$LOG" 2>&1
   else
-    # New pipeline: Layer 0 → Layer 1 (this session) → Layer 2 coalesce
-    if [ -n "$SID" ]; then
-      bash "$REPO_ROOT/bin/pipeline-run.sh" --sid "$SID" >> "$LOG" 2>&1
-    else
-      # No session_id in payload — happens for some launchd triggers
-      # or stdin-less invocations. Fall back to all-dirty sweep, which
-      # is a no-op in steady state (mtime check skips already-summarized
-      # sessions).
-      bash "$REPO_ROOT/bin/pipeline-run.sh" --all-dirty >> "$LOG" 2>&1
-    fi
+    # No session_id in payload — happens for some launchd triggers or
+    # stdin-less invocations. Fall back to all-dirty sweep, which is a
+    # no-op in steady state (mtime check skips already-summarized sessions).
+    bash "$REPO_ROOT/bin/pipeline-run.sh" --all-dirty >> "$LOG" 2>&1
   fi
 
   echo "[hook] $(date -Iseconds) refresh-bg finished" >> "$LOG"

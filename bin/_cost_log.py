@@ -3,9 +3,8 @@
 Shared helper: log a single AI call's cost & token usage to
 cache/cost_log.jsonl (append-only JSONL).
 
-Used by every script that calls `claude -p` — currently refresh.sh
-(Layer 2 / legacy classify), in the future summarize.py and classify.py
-will use the same.
+Used by every script that calls `claude -p` — currently summarize.py
+(Layer 1) and classify.py (Layer 2).
 
 Per DD-002 §12.5 the file is the contract: any tool that wants to
 report cost should append a record matching this schema.
