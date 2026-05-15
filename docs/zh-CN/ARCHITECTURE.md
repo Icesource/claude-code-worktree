@@ -8,57 +8,64 @@
 - 从一个真实用户操作追溯出整条代码路径
 - 知道哪里加新功能、哪里改 bug
 
+> 本文已针对 P14/P15 的 3-layer pipeline 重写。早期单脚本架构
+> （`refresh.sh` + `aggregate.py`）已在 commit `2ae5071` 退役。
+
 ---
 
 ## 1. 30 秒看懂
 
-读 `~/.claude/projects/*.jsonl`（Claude Code 自己的会话日志），把
-**压缩后**的视图喂给 Haiku 4.5，拿回一份**结构化脑图**，渲染成
-ANSI 树/HTML 卡片/markmap。整个流程在 hook 里**自动**跑。
+读 `~/.claude/projects/*.jsonl`（Claude Code 自己的会话日志），跑
+**两步 Haiku 4.5 pipeline**（单 session 总结 → 跨 session 分类），
+把结果落成结构化脑图，渲染成 ANSI 树 / HTML 卡片 / markmap。
+通过 Claude Code 的 hook（以及可选的 launchd）自动触发。
 
 ```mermaid
 flowchart LR
-    A["~/.claude/projects/<br/>*.jsonl<br/>(Claude Code 原始日志)"] --> B["extract.py"]
-    B --> C["cache/sessions/<br/>(每 session 一份摘要)"]
-    C --> D["aggregate.py"]
-    D --> E["cache/aggregate_input.json<br/>(200 session 拼起来)"]
-    E --> F["claude -p<br/>Haiku 4.5"]
-    G["cache/mindmap.json<br/>(上一轮结果)"] -.->|PRIOR_MINDMAP| F
-    F --> H["cache/mindmap.json<br/>(新一轮结果)"]
-    H --> R1["render.py — ANSI 树"]
-    H --> R2["render-html.py — 卡片"]
-    H --> R3["render-tree.py — 思维导图"]
-    U["用户在 UI 上的<br/>勾选/归档/删除"] -.->|"POST /api/save"| OV["cache/user_overrides.json"]
-    OV -.->|"合并进 mindmap.json"| H
+    A["~/.claude/projects/<br/>*.jsonl"] --> L0["Layer 0:<br/>extract.py"]
+    L0 --> S["cache/sessions/<br/>(每 session 元数据)"]
+    S --> L1["Layer 1:<br/>summarize.py<br/>(Haiku 4.5)"]
+    L1 --> SM["cache/summaries/<br/>每 session 一份 .md"]
+    SM --> L2["Layer 2:<br/>classify.py<br/>(Haiku 4.5)"]
+    P["cache/mindmap.json<br/>(上一轮结果)"] -.->|PRIOR_MINDMAP| L2
+    L2 --> M["cache/mindmap.json<br/>(新一轮结果)"]
+    M --> R1["render.py — ANSI 树"]
+    M --> R2["render-html.py — 卡片"]
+    M --> R3["render-tree.py — 思维导图"]
+    U["UI 上的<br/>勾选/归档/删除"] -.->|"POST /api/save"| OV["cache/user_overrides.json"]
+    OV -.->|"在 Layer 2 合并"| M
 
-    style F fill:#fff3a0,color:#000
-    style H fill:#a8e6cf,color:#000
-    style G fill:#ffd3b6,color:#000
+    style L1 fill:#fff3a0,color:#000
+    style L2 fill:#fff3a0,color:#000
+    style M fill:#a8e6cf,color:#000
+    style P fill:#ffd3b6,color:#000
 ```
+
+对比旧的单脚本架构：Layer 0（廉价、按字节增量）跟 Layer 1（按
+session AI 总结，可扇出）和 Layer 2（跨 session 分类，coalesce）
+解耦了。Layer 1 只对真正变化过的 session 跑；Layer 2 只在某个
+Layer 1 真的写了新 summary 后才跑。
 
 ---
 
 ## 2. 心智模型：三个核心概念
 
-整个项目围绕三个抽象。理解它们就理解了一半。
-
 | 概念 | 物理对应 | 谁创建 |
 |---|---|---|
 | **session** | 一个 jsonl 文件 = Claude Code 的一次会话 | Claude Code 自动写 |
-| **initiative** | 一个或多个 session 的逻辑聚合 = "一项工作" | AI 推断（在 classify 阶段） |
+| **initiative** | 一个或多个 session 的逻辑聚合 = "一项工作" | AI 推断（在 Layer 2 classify 阶段） |
 | **workspace** | 一个仓库/目录 = initiative 的容器 | AI 推断（通常对应 cwd） |
 
-例子：你在 `~/Code/hsf/hsfops` 里有 5 个 Claude Code session，
-分别在做 "ChangeFree 重构" 和 "应用文档迭代"。AI 看到这些 session
-后会输出：
+例子：你在 `~/Code/hsf/hsfops` 里有 5 个 session，分别做
+"ChangeFree 重构" 和 "应用文档迭代"，AI 会输出：
 
 - **workspace** `hsfops`
-  - **initiative** `hsfops-changefree-cleanup`（5 个 session 里的 3 个）
-  - **initiative** `hsfops-app-doc-version-no`（5 个 session 里的 2 个）
+  - **initiative** `hsfops-changefree-cleanup`（5 个中的 3 个）
+  - **initiative** `hsfops-app-doc-version-no`（5 个中的 2 个）
 
-一个 initiative 横跨多个 cwd 也是允许的（如同时改 frontend + backend
-+ skill 文件做一个特性），AI 会选其中**最有归属感**的那个 cwd 当主
-workspace，其余记到 `linked_cwds`。
+一个 initiative 横跨多个 cwd 也允许（如一个特性同时改前端+后端+
+SKILL 文件）。AI 会选**最有归属感**的 cwd 当主 workspace，其他记
+到 `linked_cwds`。
 
 ---
 
@@ -67,17 +74,22 @@ workspace，其余记到 `linked_cwds`。
 ```
 claude-code-worktree/
 ├── bin/                          # 所有可执行
-│   ├── install.sh                # 一次性安装入口（slash command + hook + launchd）
+│   ├── install.sh                # 一次性安装入口（slash + hook + launchd）
 │   ├── install-hook.sh           # 单独重装 hook 的快捷脚本
-│   ├── uninstall.sh              # 卸载
-│   ├── mindmap                   # 用户向 CLI 分发器（bash），所有命令的入口
+│   ├── uninstall.sh
+│   ├── mindmap                   # 用户向 CLI 分发器（bash）
 │   │
-│   ├── refresh.sh                # 核心 pipeline 编排器（470 行 bash + python heredoc）
-│   ├── refresh-bg.sh             # hook 触发 refresh.sh 的非阻塞包装
+│   ├── pipeline-run.sh           # 3-layer 编排器（核心）
+│   ├── refresh-bg.sh             # hook 触发 pipeline-run.sh 的非阻塞包装
+│   ├── layer2-trigger.sh         # Layer 2 的 coalesce 包装（mkdir 锁 + pending 标记）
 │   │
-│   ├── extract.py                # jsonl → cache/sessions/<sid>.json（增量）
-│   ├── aggregate.py              # cache/sessions/*.json → aggregate_input.json
-│   ├── record-location.py        # hook stdin + env → cache/session_locations.json
+│   ├── extract.py                # Layer 0: jsonl → cache/sessions/<sid>.json（增量）
+│   ├── summarize.py              # Layer 1: cache/sessions/<sid>.json → cache/summaries/<sid>.md
+│   ├── classify.py               # Layer 2: cache/summaries/*.md → cache/mindmap.json
+│   │
+│   ├── record-location.py        # hook stdin → cache/session_locations.json
+│   ├── _cost_log.py              # 共享 cost 记录助手（append cost_log.jsonl）
+│   ├── cost.py                   # `mindmap --cost` 报告工具
 │   │
 │   ├── render.py                 # mindmap.json → ANSI 树 (stdout)
 │   ├── render-html.py            # mindmap.json + archive/ + locations → mindmap.html
@@ -87,59 +99,50 @@ claude-code-worktree/
 │   └── diagnose.py               # 排障工具（mindmap --diagnose）
 │
 ├── prompts/
-│   └── classify.md               # 给 AI 的分类 prompt（277 行）
+│   ├── summarize-session.md      # Layer 1 prompt（单 session 总结）
+│   └── classify-cross-session.md # Layer 2 prompt（跨 session 分类）
 │
-├── commands/                     # Claude Code slash command 模板
-│   ├── mindmap.md                # /mindmap
-│   └── mindmap-refresh.md        # /mindmap-refresh
-│
-├── launchd/
-│   └── com.claude-code-worktree.plist   # macOS LaunchAgent 模板
+├── commands/                     # /mindmap 和 /mindmap-refresh 模板
+├── launchd/                      # macOS LaunchAgent 模板
 │
 ├── cache/                        # 运行时状态，gitignore
 │   ├── config.json               # {lang: zh-CN}
 │   ├── mindmap.json              # 主输出
 │   ├── mindmap.html              # 渲染产物
 │   ├── mindmap-tree.html         # 渲染产物
-│   ├── sessions/                 # 每 session 一份摘要
-│   ├── aggregate_input.json      # 喂给 AI 的输入
+│   ├── sessions/                 # Layer 0 输出：<sid>.json
+│   ├── summaries/                # Layer 1 输出：<sid>.md
 │   ├── state.json                # extract 的 byte offset 表
-│   ├── last_input.sha256         # 上次 input 的 hash
-│   ├── last_ai_run.epoch         # 上次真实 AI 跑的时间戳
-│   ├── user_overrides.json       # 用户在 UI 上的编辑（待消费）
+│   ├── cost_log.jsonl            # 每次 AI 调用的成本与 token（append-only）
+│   ├── user_overrides.json       # 用户在 UI 上的编辑（待 Layer 2 消费）
 │   ├── deleted_ids.json          # 用户主动删除的 initiative tombstone
 │   ├── archive/<ws>/<id>.json    # 用户归档的 initiative（AI 永远看不到）
 │   ├── session_locations.json    # session → zellij pane 映射
-│   └── refresh.lock.d/           # mkdir 锁
+│   ├── .locks/<sid>.lock.d/      # 每 session 的 Layer 1 mkdir 锁
+│   ├── .locks/layer2.lock.d/     # 全局 Layer 2 coalesce 锁
+│   ├── .layer2.pending           # pending 标记（"当前跑完后再跑一次"）
+│   └── .refresh-disabled         # 存在即 kill switch，pipeline 不做事
 │
 └── docs/                         # 本目录
-    ├── README.md                 # 索引
-    ├── ARCHITECTURE.md           # 本文（英文）
-    ├── CONTRIBUTING.md
-    ├── TROUBLESHOOTING.md
-    ├── ROADMAP.md
-    ├── design/                   # DD-NNN 设计文档
-    └── zh-CN/                    # 中文镜像
 ```
 
-按代码量：`render-html.py` (1710 行) > `refresh.sh` (470 行) >
-`render.py` (415 行) > `serve.py` (388 行) > `diagnose.py` (332 行)
-> 其它都 <300 行。
+按代码体量排序：`render-html.py`（~1900 行）> `classify.py`（~750）
+> `summarize.py`（~420）> `render.py`（~415）> `serve.py`（~380）>
+`diagnose.py`（~340）> 其他 <250。
 
 ---
 
 ## 4. 组件依赖图
 
-谁调用谁、谁读谁写。**实线 = 直接调用**，**虚线 = 通过文件交换数据**。
+谁调谁，谁读写谁。**实线 = 直接调用**，**虚线 = 文件间接**。
 
 ```mermaid
 graph TD
     install["install.sh"] -.->|写| set["~/.claude/settings.json"]
-    install -.->|符号链接| sym["~/.local/bin/mindmap"]
-    install -.->|复制| sc["~/.claude/commands/*.md"]
+    install -.->|symlink| sym["~/.local/bin/mindmap"]
     install -.->|写| la["~/Library/LaunchAgents/*.plist"]
 
-    set -.->|"Stop/SessionStart<br/>hook 触发"| bg["refresh-bg.sh"]
+    set -.->|"Stop / SessionStart"| bg["refresh-bg.sh"]
     la -.->|"每 2h"| bg
     sym --> mm["mindmap"]
 
@@ -148,312 +151,256 @@ graph TD
     mm --> rt["render-tree.py"]
     mm --> srv["serve.py"]
     mm --> diag["diagnose.py"]
-    mm --> rfsh["refresh.sh"]
+    mm --> prun["pipeline-run.sh<br/>(--refresh)"]
 
     bg --> rec["record-location.py"]
-    bg --> rfsh
+    bg --> prun
 
-    rfsh --> ext["extract.py"]
-    rfsh --> agg["aggregate.py"]
-    rfsh -.->|读| pmpt["prompts/classify.md"]
-    rfsh --> rh
-    rfsh --> rt
-    rfsh -.->|spawn| claude["claude -p<br/>Haiku 4.5"]
+    prun --> ext["extract.py"]
+    prun --> sum["summarize.py"]
+    prun --> trig["layer2-trigger.sh"]
+    trig --> cls["classify.py"]
+
+    sum -.->|读| p1["prompts/summarize-session.md"]
+    cls -.->|读| p2["prompts/classify-cross-session.md"]
+
+    sum -.->|spawn| claude1["claude --no-session-persistence -p<br/>Haiku 4.5"]
+    cls -.->|spawn| claude2["claude --no-session-persistence -p<br/>Haiku 4.5"]
 
     srv -.->|spawn| rh
     srv -.->|spawn| rt
-    srv -.->|spawn| rfsh
+    srv -.->|spawn| prun
     srv -.->|"zellij action"| zj["Zellij"]
 
-    ext -.->|读| jl["~/.claude/projects/<br/>*.jsonl"]
+    ext -.->|读| jl["~/.claude/projects/*.jsonl"]
     ext -.->|写| sess["cache/sessions/"]
-    agg -.->|读| sess
-    agg -.->|写| agi["cache/aggregate_input.json"]
-    rec -.->|写| loc["cache/session_locations.json"]
-    rfsh -.->|写| mj["cache/mindmap.json"]
+    sum -.->|读| sess
+    sum -.->|写| sumdir["cache/summaries/"]
+    cls -.->|读| sumdir
+    cls -.->|写| mj["cache/mindmap.json"]
+    sum -.->|append| cl["cache/cost_log.jsonl"]
+    cls -.->|append| cl
 
     style mj fill:#a8e6cf,color:#000
-    style claude fill:#fff3a0,color:#000
-    style rfsh fill:#ffd3b6,color:#000
+    style claude1 fill:#fff3a0,color:#000
+    style claude2 fill:#fff3a0,color:#000
+    style prun fill:#ffd3b6,color:#000
 ```
 
-最重要的两条路径：
+两条最重要的路径：
 
-1. **数据采集路径**：`jsonl → extract.py → cache/sessions/ → aggregate.py → aggregate_input.json`
-2. **AI 分类路径**：`refresh.sh 拼 prompt → claude -p → 解析 → mindmap.json`
+1. **数据采集**：`jsonl → extract.py → cache/sessions/`
+2. **AI 分类**：`cache/sessions/ → summarize.py → cache/summaries/ → classify.py → cache/mindmap.json`
 
 ---
 
-## 5. Pipeline 流程详解
+## 5. Pipeline 深挖
 
-`refresh.sh` 是整个系统的心脏，下面的流程图覆盖了它的 11 个阶段：
+`pipeline-run.sh` 是三层的编排者。Layer 2 通过 `layer2-trigger.sh`
+触发，它做 coalesce——把并发的触发合并成一次跨 session classify，
+保证安静期内只跑最多一次。
 
 ```mermaid
 flowchart TD
-    Start(["refresh.sh 启动<br/>echo hook timestamp"]) --> Lock{"mkdir<br/>refresh.lock.d<br/>成功?"}
-    Lock -- "失败" --> Stale{"stale<br/>>660s?"}
-    Stale -- "否" --> Exit1(["exit 0:<br/>another running"])
-    Stale -- "是" --> Recover["rm + 重建 lock"]
-    Lock -- "ok" --> ApplyOv
-    Recover --> ApplyOv
+    Hook(["Claude Code Stop/SessionStart hook"]) --> Bg["refresh-bg.sh"]
+    Bg -->|kill switch?| KS{".refresh-disabled<br/>存在?"}
+    KS -- 是 --> Exit0(["exit 0"])
+    KS -- 否 --> Pipe["pipeline-run.sh --sid &lt;sid&gt;"]
 
-    ApplyOv["阶段 1: 应用 user_overrides<br/>1. task done 翻转<br/>2. 删除 deleted_tasks<br/>3. 移除 archived initiatives<br/>4. 移除 deleted_ids initiatives<br/>(全部 in-place 改 mindmap.json)"] --> Extract
+    Pipe --> L0["Layer 0:<br/>extract.py<br/>（扫全部 jsonl，增量）"]
+    L0 --> L0Done["有新字节才写 session JSON"]
+    L0Done --> Dirty{"有 dirty session?<br/>（extract 比 summary 新）"}
+    Dirty -- 没有 --> Bump["Layer 2: 跳过<br/>（没东西要分类）"]
+    Bump --> ExitOK(["exit 0"])
 
-    Extract["阶段 2: extract.py<br/>增量读 ~/.claude/projects/*.jsonl<br/>更新 cache/sessions/&lt;sid&gt;.json"] --> Agg
+    Dirty -- 有 --> Filter["is_automation? user_turns&lt;1?<br/>→ 跳过"]
+    Filter --> L1["Layer 1:<br/>summarize.py &lt;sid&gt;<br/>（每 sid mkdir 锁）"]
+    L1 --> CC1["claude --no-session-persistence -p<br/>Haiku 4.5<br/>--max-budget-usd 0.50"]
+    CC1 --> SumOut["写 cache/summaries/&lt;sid&gt;.md<br/>append cost_log.jsonl"]
+    SumOut --> Trigger["layer2-trigger.sh"]
 
-    Agg["阶段 3: aggregate.py<br/>过滤 is_automation, 排序<br/>裁到 200 条, 写 aggregate_input.json"] --> Empty
+    Trigger --> L2Lock{"mkdir layer2.lock.d<br/>成功?"}
+    L2Lock -- 失败 --> Pending["touch .layer2.pending<br/>exit 0"]
+    L2Lock -- 成功 --> L2["classify.py<br/>（加载所有 summary）"]
+    L2 --> Filter2["热/冷分层（48h）<br/>过滤 user_turns&lt;2<br/>截到 MAX_HOT=120"]
+    Filter2 --> CC2["claude --no-session-persistence -p<br/>Haiku 4.5<br/>--max-budget-usd 2.50"]
+    CC2 --> ClsOut["写 cache/mindmap.json<br/>append cost_log.jsonl<br/>重渲染 mindmap.html"]
+    ClsOut --> Pend2{".layer2.pending<br/>存在?"}
+    Pend2 -- 是 --> L2
+    Pend2 -- 否 --> ExitOK
 
-    Empty{"n_sessions == 0?"}
-    Empty -- "是" --> EmptyOut["写空 mindmap.json"]
-    EmptyOut --> Done0(["exit 0"])
-    Empty -- "否" --> Hash
-
-    Hash["阶段 4: hash 检查<br/>sha256(aggregate_input.json)<br/>vs last_input.sha256"] --> HashMatch
-    HashMatch{"相同?"}
-    HashMatch -- "是" --> BumpOnly["仅 bump mindmap.json<br/>generated_at<br/>+ 重生成 HTML"]
-    BumpOnly --> Done1(["exit 0: skip-hash"])
-
-    HashMatch -- "否" --> Cool
-
-    Cool["阶段 5: cooldown 闸门<br/>now - last_ai_run.epoch<br/>vs COOLDOWN_SECS=300"] --> CoolPass
-    CoolPass{"已过冷却?<br/>或 FORCE=1?"}
-    CoolPass -- "否" --> Done2(["exit 0: skip-cooldown"])
-    CoolPass -- "是" --> Lang
-
-    Lang["阶段 6: 加载语言<br/>读 cache/config.json"] --> Prior
-    Prior["阶段 7: 加载 PRIOR_MINDMAP<br/>读当前 mindmap.json,<br/>瘦身后嵌入"] --> Del
-    Del["阶段 8: 加载 DELETED_IDS<br/>读 deleted_ids.json"] --> Build
-    Build["阶段 9: 拼 prompt<br/>classify.md<br/>+ OUTPUT_LANG<br/>+ PRIOR_MINDMAP<br/>+ DELETED_IDS<br/>+ INPUT_SESSIONS"] --> AI
-
-    AI["阶段 10: claude -p<br/>Haiku 4.5<br/>--disallowedTools<br/>--output-format json"] --> Parse
-
-    Parse["阶段 11: 解析输出<br/>1. 提 JSON from fence<br/>2. 修复短 session_id<br/>(前缀匹配 aggregate_input)<br/>3. 写 mindmap.json<br/>4. 写 last_ai_run.epoch<br/>5. 写 last_input.sha256<br/>6. log DIFF vs prior"] --> Render
-
-    Render["重生成 HTML<br/>render-html.py + render-tree.py"] --> DoneOK(["exit 0:<br/>OK ran AI"])
-
-    style AI fill:#fff3a0,color:#000
-    style ApplyOv fill:#ffd3b6,color:#000
-    style Parse fill:#ffd3b6,color:#000
+    style L1 fill:#fff3a0,color:#000
+    style L2 fill:#fff3a0,color:#000
+    style KS fill:#fcc,color:#000
+    style Pending fill:#ffeb99,color:#000
 ```
 
-### 关键阶段的代码
+### Layer 0 — `extract.py`
 
-#### 阶段 2: `extract.py:apply_record` 怎么把 jsonl 一行变成摘要字段
+纯文件 I/O。读 jsonl 的新增字节（用 `cache/state.json` 里每文件
+的 byte offset），按记录解析、应用到 `SessionSummary`，原子写
+`cache/sessions/<sid>.json`。
 
-每条 jsonl 行被解析成 `rec`，按 `type` 分发：
+关键安全网 — `_is_automation_prompt`：如果一个 session 的首条用户
+prompt 以 `AUTOMATION_PROMPT_MARKERS` 中任意一个标记字符串开头，
+就标 `is_automation`，Layer 1 跳过。标记表必须覆盖 `prompts/` 下
+**每一个** prompt 模板的开头句——漏一个就形成递归扩散（见
+DD-004 §1 和 2026-05-14 事故复盘）。
 
-```python
-# bin/extract.py:141 (节选)
-def apply_record(summary: SessionSummary, rec: dict[str, Any]) -> None:
-    t = rec.get("type")
-    ts = rec.get("timestamp")
-    if ts:
-        if summary.started_at is None or ts < summary.started_at:
-            summary.started_at = ts
-        if summary.last_activity_at is None or ts > summary.last_activity_at:
-            summary.last_activity_at = ts
+### Layer 1 — `summarize.py`
 
-    if t == "user":
-        # 用户消息：抽出文本作为 prompt
-        text = extract_text_from_message(msg).strip()
-        if text and not rec.get("toolUseResult"):
-            summary.user_message_count += 1
-            if summary.first_user_prompt is None:
-                summary.first_user_prompt = text[:PROMPT_TRIM]
-            summary.recent_user_prompts.append(text[:PROMPT_TRIM])
-            # 保留最后 RECENT_PROMPT_LIMIT=5 条
-            if len(summary.recent_user_prompts) > RECENT_PROMPT_LIMIT:
-                summary.recent_user_prompts = summary.recent_user_prompts[-RECENT_PROMPT_LIMIT:]
+针对每个传给它的 session，用 `prompts/summarize-session.md` 跑
+Haiku 4.5。输出是结构化 YAML frontmatter（workspace 推断、status、
+blockers、artifacts）+ 一段叙述，保存到 `cache/summaries/<sid>.md`。
+每 sid 一把 mkdir 锁防止并发重复工作。
 
-    elif t == "assistant":
-        # AI 回复：抽 text 块、记录工具使用、追踪 edited_files
-        for block in content:
-            if block["type"] == "tool_use":
-                name = block.get("name")
-                if name in ("Write", "Edit", "NotebookEdit"):
-                    fp = block["input"].get("file_path")
-                    summary.edited_files.append(fp)   # 真正动了哪些文件
-            elif block["type"] == "text":
-                # 保留**最后一条 assistant 回复**的前 1500 字符
-                summary.last_assistant_summary = _summarize_assistant(combined)
+`claude` 参数：
+- `--no-session-persistence` — **关键**：阻止这次嵌套调用被记成
+  新 jsonl，否则会再次触发 hook 链。
+- `--max-budget-usd 0.50` — per-call 硬上限。
+- `--disallowedTools "Bash Edit Write Read Glob Grep"` — 纯文本生成。
 
-    elif t == "system" and rec.get("subtype") == "away_summary":
-        summary.recap = rec.get("content")  # Claude Code 自带的会话回顾
-```
+### Layer 2 — `classify.py`（经由 `layer2-trigger.sh`）
 
-理解这段代码就理解了**为什么压缩是 lossy 的**：每个 session 最终只保
-留 first/recent prompts + last_assistant_summary + 一些机器信号
-（edited_files 列表、tools_used、task_events）。这正是 [DD-001](design/DD-001-two-pass-classification.md) 要替换掉的部分。
+读所有 `cache/summaries/*.md`，分热（最近 48h）/ 冷两层，应用
+user_overrides，把 prior mindmap.json + 热 summary 喂给 Haiku 4.5，
+写新的 mindmap.json。
 
-#### 阶段 9: refresh.sh 怎么拼 prompt
+`layer2-trigger.sh` 处理 fan-in 合并：如果已经在跑 classify，
+新的触发只 `touch` 一下 `.layer2.pending`；当前 classify 写完后
+检查这个标记并循环再跑。
 
-```bash
-# bin/refresh.sh:266 (节选)
-{
-  cat "$PROMPT_FILE"               # prompts/classify.md
-  echo
-  echo "OUTPUT_LANG: $OUTPUT_LANG" # 注入语言
-  echo
-  echo "CURRENT_TIME: $NOW_ISO"
-  echo
-  if [ -n "$PRIOR_BLOCK" ]; then
-    echo "PRIOR_MINDMAP:"
-    echo "$PRIOR_BLOCK"             # 上次 mindmap.json 瘦身后
-    echo
-  fi
-  if [ -n "$DEL_BLOCK" ]; then
-    echo "DELETED_IDS:"
-    echo "$DEL_BLOCK"
-    echo "(These IDs are user-deleted tombstones. Do NOT include them...)"
-  fi
-  echo "INPUT_SESSIONS:"
-  cat "$INPUT_FILE"                 # aggregate_input.json，~200 sessions
-} > "$FULL_PROMPT_FILE"
-```
-
-整个 prompt 是简单的字符串拼接，没有模板引擎。最终 ~300KB，由
-prompt cache 节省了重复成本（在 Haiku 上 cache read 是普通 token 的
-1/10 价格）。
-
-#### 阶段 10: 调 claude -p
-
-```bash
-# bin/refresh.sh:298
-perl -e 'alarm shift @ARGV; exec @ARGV' "$CLAUDE_TIMEOUT_SECS" \
-    claude -p \
-      --model "$CLAUDE_MODEL" \
-      --output-format json \
-      --disallowedTools "Bash Edit Write Read Glob Grep" \
-      < "$FULL_PROMPT_FILE" \
-      > "$CACHE_DIR/_raw_output.json"
-```
-
-几个关键点：
-- 用 `perl alarm` 替代 `timeout`（macOS 没有 `timeout` 命令）
-- `--output-format json` 让 envelope 包含 `usage` 和 `total_cost_usd`
-- `--disallowedTools` 禁掉所有工具，AI 只能输出文本（不会自己开始 Bash 一通乱搞）
+两层都 append `cache/cost_log.jsonl`，供 `mindmap --cost` 读取。
 
 ---
 
-## 6. 触发与频率控制
-
-什么时候 refresh.sh 真正会调用 AI？看这个决策树：
+## 6. 触发与节流
 
 ```mermaid
 flowchart TD
-    Start["refresh.sh 启动"] --> Lock{"lock 可拿?"}
-    Lock -- "否" --> Skip1["skip locked<br/>另一次正在跑"]
-    Lock -- "是" --> Force{"CLAUDE_WORKTREE_<br/>FORCE=1?<br/>(--refresh 触发)"}
-    Force -- "是" --> Run["调 AI"]
-    Force -- "否" --> Hash{"aggregate input<br/>hash 同上次?"}
-    Hash -- "是" --> Skip2["skip hash-same<br/>仅 bump 时间戳"]
-    Hash -- "否" --> Marker{"last_ai_run.epoch<br/>距今 &lt; 300s?"}
-    Marker -- "是" --> Skip3["skip cooldown<br/>太频繁"]
-    Marker -- "否" --> Run
+    H["Stop / SessionStart hook"] --> RB["refresh-bg.sh"]
+    LA["launchd 每 2h"] --> RB
+    UR["mindmap --refresh"] --> Pipe["pipeline-run.sh --all-dirty --force-classify"]
+    API["POST /api/refresh"] --> Pipe
 
-    style Run fill:#a8e6cf,color:#000
-    style Skip1 fill:#ffcccc,color:#000
-    style Skip2 fill:#ffeb99,color:#000
-    style Skip3 fill:#ffeb99,color:#000
+    RB --> KS{".refresh-disabled?"}
+    KS -- 是 --> Exit["exit 0（静默）"]
+    KS -- 否 --> PipeSid["pipeline-run.sh --sid &lt;sid&gt;"]
+    PipeSid --> L1?{"sid 是否 dirty?"}
+    L1? -- 否 --> Skip["跳过 Layer 1"]
+    L1? -- 是 --> L1["跑 Layer 1"]
+    L1 --> L2["触发 Layer 2（coalesce）"]
+    Pipe --> Bf["扫全部 dirty"]
+    Bf --> L2
+
+    style KS fill:#fcc,color:#000
+    style L1 fill:#fff3a0,color:#000
+    style L2 fill:#fff3a0,color:#000
 ```
 
-### 触发源汇总
-
-| 源 | 频率 | 路径 |
+| 来源 | 时机 | 行为 |
 |---|---|---|
-| Claude Code `Stop` hook | 每轮 assistant 响应后 | `bash refresh-bg.sh` fork+detach |
-| Claude Code `SessionStart` hook | session 开/恢复 | 同上 |
-| macOS LaunchAgent | 每 2h | 同上 |
-| `mindmap --refresh` | 用户命令 | 直跑，置 FORCE=1 |
-| `POST /api/refresh` | UI 上 🔄 按钮 | spawn refresh.sh，可选 FORCE |
+| Claude Code `Stop` hook | 每次 assistant 回合结束 | `refresh-bg.sh --sid <sid>`，fork+detach，hook 立即返回 |
+| Claude Code `SessionStart` hook | 开/恢复 session | 同上 |
+| macOS LaunchAgent | 每 2h | 同上，但没 SID，走 `--all-dirty` |
+| `mindmap --refresh` | 用户命令 | 强制全扫 + 强制 classify，绕过 Layer 2 的 dirty 门控 |
+| `POST /api/refresh` | UI 🔄 按钮 | 同上 |
+| `cache/.refresh-disabled` | 手动 touch | Kill switch — 所有 hook 立即 exit |
 
-### 为什么用独立的 `last_ai_run.epoch` 而不是 mindmap.json mtime
+**没有全局 cooldown 闸门了**（旧的 `last_ai_run.epoch` cooldown 是
+单脚本架构的折衷办法）。每层有自己的节流：
+- Layer 1 按 session 做 dirty 门控（mtime 比对）
+- Layer 2 由 mkdir 锁 + pending 标记做 coalesce
 
-历史 bug（已修，commit `9f01447`）：
-- 旧逻辑用 `stat mindmap.json` 算距上次"AI 跑"多久
-- 但阶段 1 apply-overrides 也写 mindmap.json，会污染 mtime
-- 用户在 UI 勾任务 → user_overrides.json → 下次 Stop hook → apply 写
-  mindmap.json → mtime 重置为 0s → cooldown 永远 "still cool"
-  → AI 永远跑不起来
-
-教训：**做闸门 ≠ 测目标文件的 mtime，要有专属 marker**。
+`--max-budget-usd` 是目前唯一的成本护栏，直到 DD-004 的预算熔断
+器实现。
 
 ---
 
 ## 7. Cache 数据模型
 
-每个 cache 文件的形状和读写者：
-
 ```mermaid
 erDiagram
-    JSONL ||--o{ SESSIONS : "extract.py reads"
-    SESSIONS ||--|| AGGREGATE : "aggregate.py reads"
-    AGGREGATE ||--|| AI_CALL : "fed as INPUT_SESSIONS"
-    PRIOR ||--|| AI_CALL : "fed as PRIOR_MINDMAP"
-    DEL ||--|| AI_CALL : "fed as DELETED_IDS"
-    AI_CALL ||--|| MINDMAP : "writes"
+    JSONL ||--o{ SESSIONS : "Layer 0 (extract.py)"
+    SESSIONS ||--o{ SUMMARIES : "Layer 1 (summarize.py)"
+    SUMMARIES ||--|| AI_CLS : "喂入 Layer 2 prompt"
+    PRIOR ||--|| AI_CLS : "作为 PRIOR_MINDMAP"
+    OVERRIDES ||--|| AI_CLS : "合并"
+    DEL ||--|| AI_CLS : "传入 DELETED_IDS"
+    AI_CLS ||--|| MINDMAP : "写入"
     MINDMAP ||--|| HTML_CARDS : "render-html.py"
     MINDMAP ||--|| HTML_TREE : "render-tree.py"
     MINDMAP ||--|| ANSI : "render.py"
-    OVERRIDES ||--o{ MINDMAP : "apply-overrides modifies"
-    ARCHIVE ||--o{ MINDMAP : "apply removes"
-    DEL ||--o{ MINDMAP : "apply removes"
-
-    JSONL { string path "~/.claude/projects/.../sid.jsonl" }
-    SESSIONS { string path "cache/sessions/sid.json" }
-    AGGREGATE { string path "cache/aggregate_input.json" }
-    PRIOR { string path "cache/mindmap.json (前一轮)" }
-    DEL { string path "cache/deleted_ids.json" }
-    OVERRIDES { string path "cache/user_overrides.json" }
-    ARCHIVE { string path "cache/archive/ws/sid.json" }
-    MINDMAP { string path "cache/mindmap.json" }
+    ARCHIVE ||--o{ HTML_CARDS : "以归档形式展示"
+    COST ||--o{ COST_REPORT : "cost.py 读取"
 ```
 
-### 各文件 sample
+### 样例：`cache/sessions/<sid>.json`
 
-**cache/sessions/cbbeb23c…json**（一个 session 的摘要）：
 ```json
 {
-  "session_id": "cbbeb23c-b6f9-4eb4-926e-7e4046c856d4",
-  "cwd": "/Users/bby/Code/pandora/pandora-sar/hsf",
-  "started_at": "2026-05-13T07:30:00Z",
-  "last_activity_at": "2026-05-13T09:19:46Z",
-  "message_count": 155,
-  "user_message_count": 16,
-  "first_user_prompt": "排查 EagleEye 链路追踪服务端 IP 为空 ...",
-  "recent_user_prompts": ["...", "...", "...", "...", "..."],
-  "last_assistant_summary": "好问题，值得停下来想清楚。\n\n## 短答\n因为 ...",
-  "edited_files": ["/tmp/aone-issue-hsf-eagleeye.md"],
+  "session_id": "...",
+  "cwd": "/Users/bby/Code/hsf/hsfops",
+  "started_at": "2026-05-14T08:00:00Z",
+  "last_activity_at": "2026-05-14T09:30:00Z",
+  "message_count": 12,
+  "user_message_count": 6,
+  "first_user_prompt": "...",
+  "recent_user_prompts": ["...", "..."],
+  "edited_files": ["src/A.java", "src/B.java"],
+  "tools_used": ["Bash", "Edit", "Read"],
   "task_events": [],
-  "recap": "在排查 EagleEye trace ...",
-  "tools_used": ["Bash", "Read", "WebFetch"],
+  "last_assistant_summary": "...",
   "is_automation": false
 }
 ```
 
-**cache/mindmap.json**（主输出，schema v2）：
+### 样例：`cache/summaries/<sid>.md`
+
+```markdown
+---
+sid: ...
+workspace: hsfops
+title: ChangeFree 重构
+status: active
+last_activity_at: 2026-05-14T09:30:00Z
+user_turns: 6
+artifacts:
+  - type: mr
+    url: https://code.alibaba-inc.com/.../mr/12345
+    status: open
+    title: ChangeFree v2 实现
+blockers:
+  - source: external-review
+    note: 等 CR 审核中
+---
+
+本次会话讨论了 ChangeFree 的核心数据流改造……
+```
+
+### 样例：`cache/mindmap.json`
+
 ```json
 {
   "schema_version": 2,
-  "generated_at": "2026-05-13T09:23:38Z",
+  "generated_at": "2026-05-14T09:32:01Z",
   "workspaces": [
     {
-      "name": "pandora/pandora-sar/hsf",
-      "cwd": "/Users/bby/Code/pandora/pandora-sar/hsf",
-      "last_activity_at": "2026-05-13T09:19:46Z",
+      "name": "hsfops",
+      "cwd": "/Users/bby/Code/hsf/hsfops",
       "initiatives": [
         {
-          "id": "hsf-eagleeye-ip-null-issue",
-          "name": "HSF EagleEye 链路追踪服务端 IP 为空问题排查",
+          "id": "hsfops-changefree-cleanup",
+          "name": "ChangeFree 重构",
           "status": "active",
-          "summary": "...",
-          "progress": "...",
-          "tasks": [
-            {"title": "分析 injvm 场景下 IP 为空", "done": false}
-          ],
-          "sessions": ["cbbeb23c-b6f9-4eb4-926e-7e4046c856d4"],
+          "sessions": ["..."],
           "linked_cwds": [],
-          "last_activity_at": "2026-05-13T09:19:46Z"
+          "tasks": [
+            {"title": "核心数据流改造", "done": false},
+            {"title": "回归测试", "done": false}
+          ],
+          "artifacts": [...],
+          "blockers": [...]
         }
       ]
     }
@@ -461,368 +408,204 @@ erDiagram
 }
 ```
 
-**cache/user_overrides.json**（用户编辑，待消费）：
-```json
-{
-  "version": 1,
-  "task_toggles": [
-    {"init_id": "hsfops-changefree-cleanup",
-     "task_title": "编译验证和 review 就绪",
-     "done": true,
-     "at": "2026-05-13T08:00:00Z"}
-  ],
-  "deleted_tasks": [],
-  "updated_at": "2026-05-13T08:00:00Z"
-}
-```
-
-下次 `refresh.sh` 阶段 1 把上面那条 toggle 烤进 mindmap.json，然后
-清空这个文件。
-
-**cache/session_locations.json**：
-```json
-{
-  "version": 1,
-  "by_session_id": {
-    "cbbeb23c-…": {
-      "session_id": "cbbeb23c-…",
-      "cwd": "/Users/bby/Code/pandora/pandora-sar/hsf",
-      "zellij_session": "main",
-      "zellij_pane_id": "27",
-      "term_program": "ghostty",
-      "started_at": "2026-05-13T07:30:00Z",
-      "updated_at": "2026-05-13T09:19:46Z"
-    }
-  }
-}
-```
-
-HTML 卡片上"@ pane 27 (main)"标记就来自这里。
-
 ---
 
-## 8. 实战走查
+## 8. 端到端走查
 
-把抽象的 pipeline 配上具体场景，串一遍。
-
-### 走查 1: 一个全新 session 怎么从对话变成卡片
+### 走查 1：一个新 session 变成卡片
 
 ```mermaid
 sequenceDiagram
     autonumber
     actor U as 用户
     participant CC as Claude Code
-    participant H as refresh-bg.sh
-    participant L as record-location.py
-    participant R as refresh.sh
+    participant BG as refresh-bg.sh
+    participant P as pipeline-run.sh
     participant E as extract.py
-    participant AI as Haiku via claude -p
+    participant S as summarize.py
+    participant T as layer2-trigger.sh
+    participant C as classify.py
     participant FS as cache/
 
-    U->>CC: claude<br/>开新会话
-    CC->>CC: 创建 sid.jsonl 空文件
-    CC->>CC: Trigger SessionStart hook
-    CC-->>H: 调 bash refresh-bg.sh<br/>stdin 含 session_id 和 cwd
-    H->>L: 读 stdin 和 env<br/>含 ZELLIJ_PANE_ID
-    L->>FS: 写 session_locations.json 中 sid 条目
-    H->>R: fork + detach
-    H-->>CC: 立即返回
+    U->>CC: claude（开新 session）
+    CC->>CC: 创建 sid.jsonl（空）
+    CC-->>BG: SessionStart hook
+    BG->>FS: record-location.py
+    BG->>P: fork+detach pipeline-run.sh --sid &lt;sid&gt;
+    BG-->>CC: 立即返回
 
-    U->>CC: 发消息 这个 bug 怎么修
-    CC->>FS: 追加 jsonl<br/>新增 user 和 assistant turn
-    CC-->>H: Stop hook 触发
-    H->>R: fork
-    R->>FS: mkdir lock 成功
-    R->>R: apply_overrides 无事可做
-    R->>E: 跑 extract.py
-    E->>FS: 读 jsonl 新字节<br/>byte offset 来自 state.json
-    E->>FS: 写 cache/sessions/sid.json
-    R->>FS: 跑 aggregate.py<br/>→ aggregate_input.json
-    R->>FS: hash check 新 sid 在里面 不同
-    R->>FS: cooldown check 假设 >300s
-    R->>FS: load PRIOR_MINDMAP 旧的
-    R->>AI: 拼 prompt send 300KB
-    AI-->>R: 新 mindmap JSON<br/>可能创建新 initiative
-    R->>FS: 写 mindmap.json<br/>修复短 ids
-    R->>FS: 写 last_ai_run.epoch
-    R->>FS: 重生成 mindmap.html
-    R->>FS: rmdir lock
-
-    Note over U: 浏览器开着 mindmap.html
-    U->>FS: 每 8s 轮询 /api/data
-    FS-->>U: 新 mindmap.json<br/>包含新卡片
+    U->>CC: 发消息
+    CC->>FS: append jsonl
+    CC-->>BG: Stop hook
+    BG->>P: fork+detach
+    P->>E: extract.py（Layer 0）
+    E->>FS: 读增量字节，写 sessions/&lt;sid&gt;.json
+    P->>P: 检测 dirty
+    P->>S: summarize.py &lt;sid&gt;（Layer 1）
+    S->>S: claude --no-session-persistence -p (Haiku)
+    S->>FS: 写 summaries/&lt;sid&gt;.md
+    S->>FS: append cost_log
+    P->>T: 触发 layer2-trigger.sh
+    T->>C: 拿到 mkdir 锁，跑 classify.py
+    C->>FS: 加载全部 summary，分类
+    C->>FS: 写 mindmap.json，重渲染 html
+    Note over U: 浏览器轮询 /api/data
+    FS-->>U: 新 mindmap，新卡片可见（classify 完成后 8 秒内）
 ```
 
-关键时间点：
-- 步骤 1-5：新 session 刚起来，hook 已经写 location 信息但 jsonl 还没内容
-- 步骤 6-7：用户首条消息让 jsonl 第一次有内容
-- 步骤 13：extract.py 增量读，**只读新字节**（state.json 记录上次读到哪）
-- 步骤 17：AI 看到这个新 session_id 在 INPUT_SESSIONS 但不在 PRIOR_MINDMAP，会创建新 initiative
-- 步骤 25：浏览器 8 秒后看到新卡片（不用刷新页面）
+### 走查 2：用户在 UI 上勾选任务完成
 
-### 走查 2: 用户在 UI 上勾完成 task
+逻辑没变 — 见 `bin/render-html.py` 客户端的 `task_toggles`、
+`bin/serve.py` 的 `POST /api/save`。服务端把 override 合并到下一次
+classify 跑（`classify.py` 的 `apply_user_overrides()`）。
+classify prompt 的 done-monotone 规则阻止 AI 把它撤销回去。
 
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as 用户
-    participant B as Browser
-    participant J as Browser JS
-    participant S as serve.py
-    participant FS as cache/
-    participant R as refresh.sh later
-    participant AI as claude -p
+### 走查 3：`mindmap --serve` 启动到出页面
 
-    U->>B: 点 task checkbox
-    J->>J: overrides.task_toggles.push(...)
-    J->>J: localStorage.setItem(...)
-    J->>J: 立即 replaceCard(initId)<br/>(in-place 重渲染卡片)
-    Note over J,B: 用户 0.1s 内看到划线效果
-    J->>S: POST /api/save<br/>(debounced 400ms)
-    S->>FS: 写 user_overrides.json
-    S->>FS: 重生成 mindmap.html (背景线程)
-    S-->>J: 200 OK
-
-    Note over R: 后续 Stop hook 触发
-    R->>FS: mkdir lock
-    R->>FS: apply_overrides<br/>读 user_overrides.json
-    Note over R,FS: 找到 (init_id, task_title)<br/>把 done 改成 true
-    R->>FS: 写回 mindmap.json (带 done:true)
-    R->>FS: 清空 user_overrides.json
-    R->>R: 继续 extract + aggregate + ...
-    R->>AI: 拼 prompt<br/>(PRIOR_MINDMAP 现在带 done:true)
-    AI->>AI: 按 done-monotone 规则<br/>必须保留 done:true
-    AI-->>R: 新 mindmap.json
-    R->>FS: 写 mindmap.json
-```
-
-关键点：
-- 步骤 4：用户**立刻看到效果**，不等服务器
-- 步骤 6：写盘是 debounce 400ms 的，连续点不会请求洪水
-- 步骤 11-12：apply_overrides 把用户的意图烤进 mindmap.json
-- 步骤 16：即使 AI 不太懂这事重要，prompt 里的 done-monotone 规则强制它保留
-
-### 走查 3: `mindmap --serve` 启动到看到页面
-
-```mermaid
-sequenceDiagram
-    autonumber
-    actor U as 用户
-    participant CLI as bin/mindmap
-    participant SRV as bin/serve.py
-    participant FS as cache/
-    participant BR as Browser
-    participant ZJ as Zellij
-
-    U->>CLI: mindmap --serve
-    CLI->>SRV: exec python3 bin/serve.py
-    SRV->>FS: regenerate_html()<br/>(调 render-html.py + render-tree.py)
-    SRV->>SRV: ThreadingHTTPServer<br/>bind 127.0.0.1:9876
-    SRV->>SRV: daemon_threads = True<br/>装 SIGINT/SIGTERM handler<br/>(用 worker thread<br/>避免 deadlock)
-    SRV-->>U: print 'http://127.0.0.1:9876/'
-    SRV->>BR: webbrowser.open(url)<br/>(macOS open 命令)
-
-    BR->>SRV: GET /
-    SRV->>FS: 比对 mindmap.json mtime<br/>vs mindmap.html mtime
-    Note over SRV,FS: JSON 更新, html 重生成
-    SRV-->>BR: serve mindmap.html
-
-    BR->>BR: JS 启动, 读嵌入的 DATA<br/>(mindmap.json) +<br/>LOCATIONS + ARCHIVED
-    BR->>BR: render() 画 cards + nav
-    BR->>SRV: 每 8s GET /api/data
-    SRV-->>BR: {mindmap, locations, archived}
-    BR->>BR: 如果 generated_at 变了<br/>swap DATA + 重 render
-
-    U->>BR: 点 🎯 focus pane 按钮
-    BR->>SRV: POST /focus {pane: "27", session: "main"}
-    SRV->>ZJ: zellij --session main<br/>action focus-pane-id 27
-    ZJ-->>SRV: ok / "already focused"
-    SRV-->>BR: 200 / {noop: true}
-    BR->>U: toast "已切换到 pane 27"
-
-    U->>CLI: Ctrl-C
-    Note over SRV: SIGINT 到达
-    SRV->>SRV: trigger_shutdown handler:<br/>spawn worker thread<br/>调 httpd.shutdown()
-    SRV->>SRV: serve_forever 退出<br/>(因为 worker thread 设了 flag)
-    SRV->>SRV: server_close()
-    SRV-->>U: '[serve] stopped'
-```
-
-关键设计：
-- 步骤 7：**daemon_threads + worker thread shutdown** 是必需的。否
-  则 SIGINT 处理器同步调 `shutdown()` 会 deadlock（之前的 bug
-  `9f01447`）
-- 步骤 12-13：每次 GET /，server 检查 json 比 html 新就**重生成
-  html**，避免用户反复重启
-- 步骤 18-20：每 8s 轮询，generated_at 变了**静默 swap 数据**，不刷
-  新页面（保留滚动位置和搜索框状态）
+逻辑没变 — 见 `bin/serve.py`。关键设计：
+- daemon_threads + worker-thread `shutdown()` 防 SIGINT 死锁
+- GET 时 regen-on-the-fly，保持 mindmap.html 跟 mindmap.json 同步
+- `/api/data` 8 秒轮询，generated_at 变了就静默 in-place re-render
 
 ---
 
-## 9. 连续性模型：PRIOR_MINDMAP 反馈循环
+## 9. 连续性模型：PRIOR_MINDMAP 反馈环
 
-这套东西能用起来的关键不是 AI 每次都聪明，而是**让 AI 在上一次的输
-出基础上 incrementally update**。
+让这个工具真正可用的不是"AI 每次都很聪明"，而是**让 AI 在它上次
+的输出之上做增量更新**。
 
 ```mermaid
 flowchart LR
-    A["mindmap.json<br/>(round N)"] -->|"瘦身后<br/>嵌入 prompt"| B["PRIOR_MINDMAP<br/>block"]
-    C["sessions/*.json<br/>+ aggregate"] --> D["INPUT_SESSIONS<br/>block"]
-    E["deleted_ids.json"] --> F["DELETED_IDS<br/>block"]
-    B --> G["claude -p Haiku"]
-    D --> G
-    F --> G
-    G --> H["mindmap.json<br/>(round N+1)"]
-    H -.->|"下一轮"| A
-
-    style A fill:#fdd,color:#000
-    style H fill:#dfd,color:#000
-    style G fill:#ffd,color:#000
+    A["mindmap.json（第 N 轮）"] -->|slim 后| B["PRIOR_MINDMAP 块"]
+    C["summaries/*.md（热）"] --> D["INPUT_SESSIONS 块"]
+    E["deleted_ids.json"] --> F["DELETED_IDS"]
+    O["user_overrides"] --> Merge["apply_user_overrides"]
+    Merge --> B
+    B & D & F --> G["claude -p Haiku<br/>(Layer 2)"]
+    G --> H["mindmap.json（第 N+1 轮）"]
+    H -.->|下一轮| A
 ```
 
-`prompts/classify.md` 里有一段 **Continuity rules**，约束 AI：
+`prompts/classify-cross-session.md` 里有 Continuity rules 约束 AI：
 
-1. **id 稳定**：同一概念的工作必须复用 id，即使 name 微调
-2. **name 慎重**：task title 不要无谓地重写
-3. **done 单调**：标完成的不能反悔
-4. **status 衰减**：
-5. **不删 prior task**：它们是历史
-6. **新增有据**：新 task/initiative 必须能从 INPUT_SESSIONS 找到依据
+1. **稳定 id** — 同一概念性的工作必须复用同一个 id
+2. **保守改名** — 任务标题不轻易重写
+3. **done 单调** — 一旦 `done: true`，永远 true
+4. **冷 initiative 不可变（§5）** — 超过 48h 没活动的 initiative
+   必须与 PRIOR 字节一致（只允许 status 衰减）
+5. **不删历史任务** — 它们是历史
+6. **新条目要有依据** — INPUT_SESSIONS 里要找得到证据
 
-正是这个反馈循环让"用户勾完成的 task 不会被 AI 撤销"这种事情成立——
-AI 在 prior 里看到 `done: true`，按 monotone 规则不能改。
-
-详情见 [`prompts/classify.md`](../../prompts/classify.md) 的
-"Continuity rules" 段。
+这就是"用户标完成的任务能扛得过 AI 重分类"的原因：AI 看到 PRIOR
+里 `done:true`，单调规则禁止改回；如果 AI 飘了，classify.py 的
+post-process 会兜底修复。
 
 ---
 
 ## 10. Initiative 状态机
 
-每个 initiative 的 status 字段在 4 个状态之间转：
-
 ```mermaid
 stateDiagram-v2
-    [*] --> active: 新 initiative<br/>(基于新 session 证据)
-    active --> active: 持续有新活动<br/>(≤3 天)
-    active --> paused: 3-14 天没动
-    paused --> active: 新证据出现
-    paused --> archived: >14 天 且 没 resume 信号
-    active --> done: 显式完成<br/>(merge, ship, etc.)
+    [*] --> active: 新建（来自 session 证据）
+    active --> active: 持续活动（≤3 天）
+    active --> paused: 3–14 天空闲
+    paused --> active: 新证据
+    paused --> archived: >14 天，无 resume 信号
+    active --> done: 显式完成
     paused --> done: 显式完成
-    done --> active: 重新激活<br/>(罕见)
+    done --> active: 重新激活（少见）
 
-    active --> archived: 用户主动归档<br/>(UI 操作)
-    paused --> archived: 用户主动归档
-    done --> archived: 用户主动归档
+    active --> archived: 用户手动归档
+    paused --> archived: 用户手动归档
+    done --> archived: 用户手动归档
     archived --> active: 用户取消归档
-    archived --> [*]: 用户主动删除<br/>(进 tombstone)
-
-    note right of archived
-        AI 决定的 archived =<br/>>14 天未动
-        用户决定的 archived =<br/>挪到 cache/archive/<br/>(从 mindmap.json 物理移除)
-    end note
+    archived --> [*]: 用户删除（tombstone）
 ```
 
-注意两种 archived 的差别：
-- **AI 标的 archived**：还在 mindmap.json 里，只是 status=archived
-- **用户在 UI 点归档**：物理移到 `cache/archive/<ws>/<id>.json`，
-  mindmap.json 不再有这个 initiative。HTML 仍能展示因为 render-html
-  会读 archive/ 目录
+两种 archived：
+- **AI 标归档**（>14 天空闲）— 还在 mindmap.json 里，只是 `status=archived`
+- **用户手动归档** — 物理移到 `cache/archive/<ws>/<id>.json`；
+  mindmap.json 不再含它。HTML 还能看到因为 `render-html.py` 读
+  archive/ 目录
 
 ---
 
 ## 11. 并发与原子性
 
-当前的锁很简陋，单用户单机够用。
+锁是层级化的，不再有全局锁：
 
-```mermaid
-graph LR
-    A1["refresh.sh 实例 A"] -.->|竞争| L1["cache/refresh.lock.d<br/>(mkdir 锁)"]
-    A2["refresh.sh 实例 B"] -.->|竞争| L1
-    L1 -->|"拿到"| S1["实例 A 跑完"]
-    L1 -->|"失败"| S2["实例 B 立即退出"]
+| 资源 | 锁 | 粒度 |
+|---|---|---|
+| Layer 0（`extract.py`） | 不需要 | 每次 `pipeline-run.sh` 调用内单进程扫，内容幂等 |
+| Layer 1（`summarize.py`） | `cache/.locks/<sid>.lock.d/` | 按 session |
+| Layer 2（`classify.py`） | `cache/.locks/layer2.lock.d/` | 全局（同时只一个 classify） |
+| Layer 2 fan-in | `cache/.layer2.pending` 标记 | 当前跑完后再跑一次 |
+| `user_overrides.json` 写 | 无 | last-writer-wins（~100ms 窗口） |
 
-    B1["serve.py /api/save"] -.->|"无锁"| F1["user_overrides.json"]
-    B2["refresh.sh apply_overrides"] -.->|"无锁"| F1
-    F1 -.->|"竞争窗口 ~100ms"| R["Race: last-writer-wins"]
-
-    style L1 fill:#dfd,color:#000
-    style R fill:#fdd,color:#000
-```
-
-### 现状
-
-| 风险 | 防护 |
-|---|---|
-| 两次 refresh.sh 并行 | `cache/refresh.lock.d` mkdir 锁 |
-| `serve.py /api/save` 和 `apply_overrides` 竞争 | 暂无；窗口 ~100ms |
-| 多浏览器 tab 同时 POST | 暂无；last-write-wins |
-| Reader 读到半写 json | 暂无；json.dump 非原子 |
-
-### 加固方案
-
-详细设计见 [ROADMAP.md → P11.0](ROADMAP.md#p110--cache-写入的并发锁)。
-
-核心想法：`bin/_cache_lock.py` 提供 `fcntl.flock` 上下文管理器，所有
-写 cache 文件的路径都用同名锁串行化。`mindmap.json` 改用 atomic
-`tmp + rename` 写。
+所有 mkdir 锁都有 stale-lock 清理（`find -mmin +N` 在获取前查），
++ `trap rmdir EXIT` 崩溃时释放。**不用 `flock(1)`**——它是
+util-linux 独占，stock macOS 没有（P14 上线踩过的雷，见
+[feedback_macos_portability](../../../.claude/projects/-Users-bby-Code-claude-code-worktree/memory/feedback_macos_portability.md)）。
 
 ---
 
-## 12. 关键不变量
+## 12. 关键不变式
 
-代码或 prompt 强制保证。违反就是 bug。
+代码或 prompt 强制保证，违反就是 bug。
 
-1. `cache/mindmap.json` schema_version == 2
-2. 每个 initiative 有非空 `id` 和 `sessions[]`
-3. `sessions[]` 是完整 UUID（refresh.sh 后处理修复截断；commit `9f01447`）
-4. 一旦 task `done: true` 跨 refresh 都保持（除非用户主动反勾）
-5. Archived initiative 永远不在 PRIOR_MINDMAP（refresh.sh 拼 prompt 前剥离）
-6. `cache/last_ai_run.epoch` 仅在真实 AI 调用成功后才 bump（commit `9f01447`）
-7. `aggregate.py` 跳过 `is_automation=true` 的 session（防止分类器看见自己）
+1. `cache/mindmap.json` `schema_version == 2`
+2. 每个 initiative 都有非空 `id` 和 `sessions[]`
+3. `sessions[]` 都是完整 UUID（classify.py post-process 修截断）
+4. `done: true` 在多轮 refresh 间不可逆（Continuity 规则）
+5. 归档的 initiative 永远不进 PRIOR_MINDMAP（prompt 构造前过滤）
+6. 冷 initiative（>48h 空闲）在两轮间字节一致（Continuity §5；
+   post-process 兜底修复）
+7. `extract.py` 把首 prompt 匹配 `AUTOMATION_PROMPT_MARKERS` 的
+   session 标 `is_automation`，Layer 1 跳过。标记表必须覆盖所有
+   prompt 模板；漏一个就形成自递归（$51 事故）。
+8. Layer 1/2 永远用 `claude --no-session-persistence -p` 调用；
+   不加这个 flag，嵌套调用会被记成新 session，hook 链无限递归。
 
 ---
 
-## 13. 这套架构的短板
+## 13. 已知短板
 
-老实说不行的地方：
+### 13.1 热 summary cap 是硬天花板
 
-### 13.1 单 session 理解深度
+`MAX_HOT=120` 限制 Layer 2 每次最多看多少最近 summary。如果哪天
+活跃 session 突然 >120，最老的会落入"冷"区域，不再影响新一轮
+分类。实际不太遇到；写在这里以防规模变化。
 
-`extract.py` 把每个 session 硬压成 ~1.5KB。AI 永远看不到完整对话。
-症状：长 session 的卡片进度滞后于实际工作。
+### 13.2 没有实时预算/告警
 
-**典型 case**：你在调一个 bug 排查 90 分钟，找到根因、提了 Aone
-ISSUE，但卡片还停留在"还在排查"——因为 AI 看到的 last_assistant_summary
-只是最后一轮回复的前 1500 字符（恰好是"好问题，让我想想"这种开场白）。
+有 kill switch（`cache/.refresh-disabled`）但没实时告警。今天你
+只有手动跑 `mindmap --cost` 才知道异常。DD-004 规划了日预算 +
+速率监控 + 仪表盘 banner，未实现。
 
-**修复方案**：[DD-001](design/DD-001-two-pass-classification.md)
-用 per-session AI summary 替代硬压缩。
+### 13.3 没有生命周期控制面
 
-### 13.2 全局 cooldown 的颗粒度太粗
+装上以后 pipeline 永远在跑。没有"周末暂停"或"只在我打开仪表盘
+时跑"的开关。DD-005 提了 opt-in 生命周期模型。
 
-`last_ai_run.epoch` 是单一全局闸门——你不能"只刷新这一张卡片"，必须
-重新分类全部 200 个 session。同一个 DD-001 解决。
+### 13.4 跨主机/多用户
 
-### 13.3 跨主机 / 多用户
-
-loopback-only 是设计意图。不支持远程访问、多人协作，也不打算支持。
+故意只走 loopback。不远程访问、不协作，也不打算支持。
 
 ---
 
 ## 14. 学习路径
 
-读到这里你已经看了系统的全景。下一步建议：
+到这里你已经看完整个系统了。建议下一步：
 
-1. **跑一遍**：`mindmap --diagnose` 看你当前的 pipeline 状态
-2. **追一个真实 session**：找你最近的 session_id，用 `mindmap --diagnose <sid>` 逐阶段看
-3. **改一段代码**：试试改 `extract.py` 里 `SUMMARY_TRIM` 常量，或者
-   `refresh.sh` 里 `COOLDOWN_SECS` 默认值，跑一次 `mindmap --refresh`
-   观察 DIFF 输出
-4. **看一份 prompt**：`cat prompts/classify.md`，思考为什么 AI 行为
-   不总是符合预期
-5. **读一份 DD**：[DD-001](design/DD-001-two-pass-classification.md)
-   是当前最重要的待办设计
+1. **看自己的状态**：`mindmap --diagnose` 走一遍所有阶段，看 kill switch / cost / hook 状态
+2. **追一个真实 session**：`mindmap --diagnose <sid>` 看一个具体 session 卡在哪一阶段
+3. **读 prompt**：`cat prompts/summarize-session.md`（Layer 1）和 `cat prompts/classify-cross-session.md`（Layer 2）
+4. **读 DD**：
+   - [DD-002](design/DD-002-ai-pipeline-redesign.md) — 为什么是 3 层
+   - [DD-003](design/DD-003-card-detail-and-artifacts.md) — 卡片细节 + artifact 提取
+   - [DD-004](../../design/DD-004-circuit-breaker-and-alarm.md) — 预算熔断器（提案）
+   - [DD-005](../../design/DD-005-lifecycle.md) — 生命周期 opt-in（提案）
+   - [DD-006](../../design/DD-006-card-derived-ai-features.md) — 周报 / AI Tips / 暖心提醒（提案）
+   - [DD-007](../../design/DD-007-agent-auto-runner.md) — 卡片级 AI 代理推进（提案）
 
-需要更细的某一块讲解、或者想我专门写一份某个组件的 deep dive，告诉我。
+想深挖某个组件？告诉我。
