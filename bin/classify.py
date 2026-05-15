@@ -290,6 +290,46 @@ def archived_ids_on_disk() -> set[str]:
     return out
 
 
+def archived_session_ids_on_disk() -> dict[str, str]:
+    """Map of {session_id: most-recent archived_at} for sessions that
+    lived inside a user-archived initiative.
+
+    Caller compares each session's `last_activity_at` against this
+    timestamp: if the session hasn't been touched since being
+    archived, it stays tombstoned (AI won't see it, can't recreate
+    the initiative under a new id). If the user reopens the session
+    and works on it again, last_activity > archived_at → the session
+    is automatically un-tombstoned for the next classify round.
+
+    Background: simply id-blacklisting an archived initiative isn't
+    enough — AI can mint a NEW id for the same hot session and the
+    card reappears (observed on 2026-05-15: same conceptual work
+    archived 3 times under 3 slightly-different ids). And simply
+    permanent-blacklisting the session_id over-archives long-lived
+    sessions (e.g. session 940413c0 was once in
+    claude-code-worktree-localization-hierarchy but has months of
+    later work on a different topic; tombstoning it would erase that).
+    Time-windowed tombstoning splits the difference.
+    """
+    out: dict[str, str] = {}
+    if not ARCHIVE_DIR.is_dir():
+        return out
+    for f in ARCHIVE_DIR.glob("*/*.json"):
+        try:
+            rec = json.loads(f.read_text())
+            archived_at = rec.get("archived_at") or ""
+            init = rec.get("initiative") or {}
+            for sid in (init.get("sessions") or []):
+                if not sid:
+                    continue
+                # Keep the most-recent archive of this session
+                if sid not in out or archived_at > out[sid]:
+                    out[sid] = archived_at
+        except (json.JSONDecodeError, OSError):
+            continue
+    return out
+
+
 # ---------- apply user overrides ------------------------------------------
 
 
@@ -918,6 +958,25 @@ def main() -> int:
     cold_count = len(all_summaries) - len(hot)
     hot_total = len(hot)
 
+    # Filter user-archived session_ids: when the user archived an
+    # initiative, its sessions are tombstoned UNTIL they're touched
+    # again (last_activity_at > archived_at). New activity
+    # automatically un-tombstones — the session reappears in a fresh
+    # initiative. Prevents the "archive recreates with a new id" loop.
+    archived_sids_map = archived_session_ids_on_disk()
+    if archived_sids_map:
+        def is_still_archived(sid: str, fm: dict) -> bool:
+            arch_at = archived_sids_map.get(sid)
+            if not arch_at:
+                return False
+            last_act = fm.get("last_activity_at") or ""
+            return last_act <= arch_at
+        before = len(hot)
+        hot = [tup for tup in hot if not is_still_archived(tup[0], tup[1])]
+        filtered_archived = before - len(hot)
+    else:
+        filtered_archived = 0
+
     # Filter low-signal sessions: 1-turn (likely automation noise).
     if MIN_TURNS > 1:
         def has_enough_turns(fm):
@@ -926,7 +985,7 @@ def main() -> int:
             except (TypeError, ValueError):
                 return True
         hot = [tup for tup in hot if has_enough_turns(tup[1])]
-        filtered_thin = hot_total - len(hot)
+        filtered_thin = hot_total - len(hot) - filtered_archived
     else:
         filtered_thin = 0
 
@@ -941,6 +1000,9 @@ def main() -> int:
 
     print(f"[classify] summaries: {len(all_summaries)} total, "
           f"{hot_total} hot (last {HOT_HOURS}h), {cold_count} cold")
+    if filtered_archived:
+        print(f"[classify] filtered {filtered_archived} archived-session(s) "
+              f"(user-archived; will NOT regenerate as new initiative)")
     if filtered_thin:
         print(f"[classify] filtered {filtered_thin} thin sessions "
               f"(user_turns<{MIN_TURNS})")

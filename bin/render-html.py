@@ -547,6 +547,7 @@ section.archive-zone div.archive-body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
   gap: 10px;
+  align-items: start;
 }
 section.archive-zone article.card {
   opacity: 0.75; padding: 12px; font-size: 13px;
@@ -576,6 +577,10 @@ div.ws-body {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(420px, 1fr));
   gap: 14px;
+  /* Each card to its natural height — default `stretch` makes every
+     card in a row as tall as the tallest, leaving large dead space
+     below short cards' footers. */
+  align-items: start;
 }
 
 /* ---------- Card ---------- */
