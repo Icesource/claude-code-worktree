@@ -12,7 +12,11 @@ for when to write one.
 |---|---|---|
 | [DD-001](DD-001-two-pass-classification.md) | Two-pass classification: per-session AI summaries replace hard compression | Superseded by DD-002 |
 | [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline redesign (three layers + hot/cold + dirty tracking + coalesce) | Implemented (P14) |
-| [DD-003](DD-003-card-detail-and-artifacts.md) | Card detail modal: artifact extraction (CR/issue/branch) + blocker tracking | **Proposed** |
+| [DD-003](DD-003-card-detail-and-artifacts.md) | Card detail modal: artifact extraction (CR/issue/branch) + blocker tracking | Implemented (P15) |
+| [DD-004](DD-004-circuit-breaker-and-alarm.md) | Cost circuit breaker + runaway alarm (daily cap, rate watchdog, dashboard banner) | **Proposed** |
+| [DD-005](DD-005-lifecycle.md) | Lifecycle / opt-in operation model (pause/resume, serve-only mode) | **Proposed** |
+| [DD-006](DD-006-card-derived-ai-features.md) | Card-derived AI features (weekly report, next-steps, tips, wellness) | **Proposed** |
+| [DD-007](DD-007-agent-auto-runner.md) | Card-driven AI agent auto-runner | **Idea-stage, needs POC** |
 
 ## Template
 

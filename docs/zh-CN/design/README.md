@@ -11,7 +11,11 @@
 |---|---|---|
 | [DD-001](DD-001-two-pass-classification.md) | 两段式分类：用每 session AI 摘要替代硬压缩 | Superseded by DD-002 |
 | [DD-002](DD-002-ai-pipeline-redesign.md) | AI Pipeline 重设计（三层 + 冷热 + dirty tracking + coalesce） | 已实施（P14）|
-| [DD-003](DD-003-card-detail-and-artifacts.md) | 卡片详情 modal：artifact 提取（CR/issue/branch）+ 卡点追踪 | **Proposed** |
+| [DD-003](DD-003-card-detail-and-artifacts.md) | 卡片详情 modal：artifact 提取（CR/issue/branch）+ 卡点追踪 | 已实施（P15）|
+| [DD-004](../../design/DD-004-circuit-breaker-and-alarm.md) | 成本熔断器 + 异常告警（日预算、速率监控、面板 banner） | **Proposed** |
+| [DD-005](../../design/DD-005-lifecycle.md) | 生命周期 / opt-in 运行模式（pause/resume、serve-only） | **Proposed** |
+| [DD-006](../../design/DD-006-card-derived-ai-features.md) | 基于卡片的 AI 派生功能（周报、下一步建议、tips、暖心提醒） | **Proposed** |
+| [DD-007](../../design/DD-007-agent-auto-runner.md) | 卡片驱动的 AI 代理自动推进 | **Idea-stage，需要 POC** |
 
 ## 模板
 
