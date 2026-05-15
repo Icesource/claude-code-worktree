@@ -110,11 +110,27 @@ weight that risks drift.)
      "this isn't working, let me try something else", followed by no
      follow-up.
 
-3. **Output language.** All natural-language content (the body of
-   each section) is in `output_lang`. Technical terms — `HSF`, `MR`,
-   `IP`, `span`, `OAuth`, `prompt`, `cache`, file paths, identifiers —
-   stay in English even in Chinese mode. Frontmatter values stay
-   English/raw.
+3. **Output language.** Apply `output_lang` to all natural-language
+   content, whether in the body or in the frontmatter. Technical
+   terms — `HSF`, `MR`, `IP`, `span`, `OAuth`, `prompt`, `cache`,
+   file paths, identifiers — stay in English even in Chinese mode.
+
+   - **Body** (every H1 section): in `output_lang`.
+   - **Frontmatter natural-language fields** (in `output_lang`):
+     - `tasks[].title`
+     - `artifacts[].title`
+     - `blockers[]` strings
+   - **Frontmatter machine fields** (always English/raw, regardless of
+     `output_lang`):
+     - `session_id`, `cwd`, `started_at`, `last_activity_at`,
+       `updated_at`, `user_turns`, `status_guess`
+     - `artifacts[].type`, `artifacts[].url`, `artifacts[].status`,
+       `artifacts[].ref_id`, `artifacts[].last_mentioned_at`
+     - `tasks[].done`
+
+   Mixing English titles in a Chinese-locale summary breaks downstream
+   slug-based dedup (the same task ends up as two entries: one zh,
+   one en). Always honor `output_lang` for titles.
 
 4. **No fluff.** "继续推进中" / "the user is using Claude Code" are
    forbidden. Every sentence must carry concrete signal that another

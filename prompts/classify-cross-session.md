@@ -219,11 +219,27 @@ omit the `tasks` key entirely (do NOT emit `[]`).
 
 # Output language
 
-All natural-language fields (`name`, `summary`, `progress`,
-`task.title`) in `output_lang`. Tech terms — HSF, MR, IP, OAuth,
-branch names, file paths, command names — stay in English even in
-Chinese mode. Identifiers (`id`, `cwd`, status enum, `session_id`)
-are always English/raw.
+All natural-language fields in `output_lang`:
+- `workspace.name`
+- `initiative.name`, `initiative.summary`, `initiative.progress`
+- `task.title`
+- `artifact.title`
+- `blockers[]` (strings)
+
+Tech terms — HSF, MR, IP, OAuth, branch names, file paths, command
+names — stay in English even in Chinese mode. Identifiers and
+machine fields are always English/raw regardless of `output_lang`:
+- `id`, `cwd`, `session_id`
+- `status` enum values (active/paused/done/archived)
+- `artifact.type`, `artifact.url`, `artifact.status`,
+  `artifact.ref_id`, `artifact.last_mentioned_at`
+- `task.done`
+
+When you see PRIOR or a hot summary using a different language for a
+natural-language field, **rewrite it to match `output_lang`**. Do not
+preserve the original. Mixed-language titles defeat downstream
+slug-based dedup and produce duplicate task entries for the same
+work.
 
 # Workflow
 
