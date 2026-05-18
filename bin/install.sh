@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
 # One-step installer for claude-code-worktree.
-# Sets up: slash commands, shell wrapper, Claude Code hooks, and periodic
-# background refresh (macOS only). Does NOT trigger a model call.
+# Sets up: slash commands, shell wrapper, Claude Code hooks.
+# Does NOT trigger a model call. Does NOT install a launchd timer —
+# the dashboard's own scheduler (`mindmap --serve`) now handles
+# periodic derived features; the Stop/SessionStart hooks handle the
+# main pipeline in real time.
 #
 # Usage: bash bin/install.sh [--lang zh-CN|en]
 set -euo pipefail
@@ -63,7 +66,7 @@ data["lang"] = lang
 data.setdefault("version", 1)
 json.dump(data, open(path, "w"), indent=2, ensure_ascii=False)
 PY
-echo "[0/4] wrote config: $CONFIG_FILE (lang=$LANG_CHOICE)"
+echo "[0/3] wrote config: $CONFIG_FILE (lang=$LANG_CHOICE)"
 
 
 # --- 1. Slash commands -------------------------------------------------------
@@ -75,7 +78,7 @@ for cmd in mindmap mindmap-refresh; do
   src="$REPO_ROOT/commands/$cmd.md"
   dst="$COMMANDS_DIR/$cmd.md"
   sed "s|__REPO__|$REPO_ROOT|g" "$src" > "$dst"
-  echo "[1/4] installed slash command: /$cmd"
+  echo "[1/3] installed slash command: /$cmd"
 done
 
 # --- 2. Shell wrapper --------------------------------------------------------
@@ -86,7 +89,7 @@ if [ -L "$BIN_LINK" ] || [ -f "$BIN_LINK" ]; then
   rm "$BIN_LINK"
 fi
 ln -s "$REPO_ROOT/bin/mindmap" "$BIN_LINK"
-echo "[2/4] linked shell wrapper: mindmap -> $REPO_ROOT/bin/mindmap"
+echo "[2/3] linked shell wrapper: mindmap -> $REPO_ROOT/bin/mindmap"
 if ! echo ":$PATH:" | grep -q ":$LOCAL_BIN:"; then
   echo "      WARNING: $LOCAL_BIN is not in \$PATH"
   echo "      Add to your shell rc:  export PATH=\"\$HOME/.local/bin:\$PATH\""
@@ -132,24 +135,22 @@ ensure_hook("SessionStart")
 with open(path, "w") as f:
     json.dump(data, f, indent=2, ensure_ascii=False)
 PY
-echo "[3/4] installed Claude Code hooks (Stop + SessionStart)"
+echo "[3/3] installed Claude Code hooks (Stop + SessionStart)"
 
-# --- 4. Periodic background refresh (platform-specific) ----------------------
+# --- 4. Cleanup any pre-existing launchd timer ------------------------------
+# Earlier versions of this installer added a 2h launchd job as a "hook
+# missed" backup. We removed that — the hook is reliable, the
+# `mindmap --serve` scheduler now handles derived features (tips,
+# weekly, etc.), and the 2h job clashed with the lazy-refresh
+# principle (it kept running even when no one was looking at the
+# dashboard). If we find an existing plist from an older install, evict it.
 if [ "$OS" = "Darwin" ]; then
-  LAUNCHAGENTS_DIR="$HOME_DIR/Library/LaunchAgents"
-  mkdir -p "$LAUNCHAGENTS_DIR"
-  PLIST_DST="$LAUNCHAGENTS_DIR/com.claude-code-worktree.plist"
-
-  sed -e "s|__REPO__|$REPO_ROOT|g" -e "s|__HOME__|$HOME_DIR|g" \
-    "$REPO_ROOT/launchd/com.claude-code-worktree.plist" > "$PLIST_DST"
-
-  launchctl unload "$PLIST_DST" 2>/dev/null || true
-  launchctl load "$PLIST_DST"
-  echo "[4/4] loaded launchd fallback timer (every 2h)"
-else
-  echo "[4/4] skipped launchd (not macOS)"
-  echo "      Optional: set up a cron job for periodic refresh:"
-  echo "        0 */2 * * * bash $REPO_ROOT/bin/refresh-bg.sh"
+  OLD_PLIST="$HOME_DIR/Library/LaunchAgents/com.claude-code-worktree.plist"
+  if [ -f "$OLD_PLIST" ]; then
+    launchctl unload "$OLD_PLIST" 2>/dev/null || true
+    rm -f "$OLD_PLIST"
+    echo "[cleanup] removed obsolete launchd 2h job from previous install"
+  fi
 fi
 
 echo

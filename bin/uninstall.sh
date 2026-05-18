@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Uninstall claude-code-worktree: remove slash commands, shell wrapper,
-# Claude Code hooks, and macOS LaunchAgent.
+# and Claude Code hooks (also evicts an obsolete launchd job if a
+# previous install left one behind).
 set -euo pipefail
 
 HOME_DIR="$HOME"
@@ -14,7 +15,7 @@ for cmd in mindmap mindmap-refresh; do
   link="$HOME_DIR/.claude/commands/$cmd.md"
   if [ -L "$link" ] || [ -f "$link" ]; then
     rm "$link"
-    echo "[1/4] removed slash command: /$cmd"
+    echo "[1/3] removed slash command: /$cmd"
   fi
 done
 
@@ -22,9 +23,9 @@ done
 BIN_LINK="$HOME_DIR/.local/bin/mindmap"
 if [ -L "$BIN_LINK" ] || [ -f "$BIN_LINK" ]; then
   rm "$BIN_LINK"
-  echo "[2/4] removed shell wrapper: $BIN_LINK"
+  echo "[2/3] removed shell wrapper: $BIN_LINK"
 else
-  echo "[2/4] shell wrapper not found, skipping"
+  echo "[2/3] shell wrapper not found, skipping"
 fi
 
 # 3. Claude Code hooks
@@ -53,25 +54,22 @@ for event in list(hooks.keys()):
 if not hooks:
     data.pop("hooks", None)
 json.dump(data, open(path, "w"), indent=2, ensure_ascii=False)
-print(f"[3/4] removed {removed} hook entries from {path}")
+print(f"[3/3] removed {removed} hook entries from {path}")
 PY
 else
-  echo "[3/4] no settings.json found, skipping"
+  echo "[3/3] no settings.json found, skipping"
 fi
 
-# 4. macOS LaunchAgent
+# Legacy cleanup: earlier versions of the installer added a 2h
+# launchd job. Remove it if still present so an `uninstall` from a
+# new install still cleans up old artifacts.
 if [ "$OS" = "Darwin" ]; then
   PLIST="$HOME_DIR/Library/LaunchAgents/com.claude-code-worktree.plist"
   if [ -f "$PLIST" ]; then
     launchctl unload "$PLIST" 2>/dev/null || true
     rm "$PLIST"
-    echo "[4/4] removed LaunchAgent"
-  else
-    echo "[4/4] LaunchAgent not found, skipping"
+    echo "[cleanup] removed obsolete launchd job from previous install"
   fi
-else
-  echo "[4/4] not macOS, skipping LaunchAgent removal"
-  echo "      If you added a cron job, remove it manually: crontab -e"
 fi
 
 echo

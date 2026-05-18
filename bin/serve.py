@@ -191,6 +191,14 @@ def _read_last_run(feature: str) -> str | None:
         return None
 
 
+def _mindmap_mtime() -> float:
+    """Return mindmap.json mtime, or 0 if missing."""
+    try:
+        return MINDMAP_JSON.stat().st_mtime
+    except OSError:
+        return 0.0
+
+
 def _derived_scheduler_loop(stop_event) -> None:
     """Tick every minute; respect each feature's gating."""
     # On startup: kick off tips immediately if it's overdue.
@@ -203,6 +211,9 @@ def _derived_scheduler_loop(stop_event) -> None:
         _run_derived("tips.py")
     # Wellness piggybacks on the tips tick (cheap; signal-gated).
     _run_derived("wellness.py")
+    # next_steps: regenerate on startup so the sidebar is current.
+    _run_derived("next_steps.py")
+    last_mindmap_mtime = _mindmap_mtime()
 
     while not stop_event.is_set():
         # Sleep in small slices so we can exit promptly on shutdown.
@@ -224,6 +235,18 @@ def _derived_scheduler_loop(stop_event) -> None:
                 _run_derived("wellness.py")
         else:
             _run_derived("tips.py")
+
+        # next_steps: regenerate when mindmap.json was updated (a fresh
+        # classify ran in the background). next_steps.py has its own
+        # 30-minute debounce so noisy mindmap rewrites don't burst the
+        # AI call.
+        current_mtime = _mindmap_mtime()
+        if current_mtime > last_mindmap_mtime:
+            print(f"[sched] next_steps: mindmap.json changed "
+                  f"({current_mtime:.0f} > {last_mindmap_mtime:.0f})",
+                  file=sys.stderr)
+            _run_derived("next_steps.py")
+            last_mindmap_mtime = current_mtime
 
         # Weekly: Friday 12:00 local, once per ISO week.
         last_weekly_at = _read_last_run("derived.weekly_report")

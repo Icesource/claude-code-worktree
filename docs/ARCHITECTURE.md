@@ -20,7 +20,10 @@ Reads `~/.claude/projects/*.jsonl` (Claude Code's own session log),
 runs a **two-step Haiku 4.5 pipeline** (per-session summarize →
 cross-session classify), persists the result as a structured mindmap,
 renders to ANSI tree / HTML cards / markmap. Triggered automatically
-by Claude Code hooks and (optionally) launchd.
+by Claude Code Stop / SessionStart hooks. Derived AI features (tips,
+weekly report, next-step suggestions, wellness nudges) are scheduled
+by `mindmap --serve`'s in-process scheduler — they only run while
+the dashboard server is up, per DD-005's lazy-refresh principle.
 
 ```mermaid
 flowchart LR
@@ -77,7 +80,7 @@ fitting** cwd as primary; others go under `linked_cwds`.
 ```
 claude-code-worktree/
 ├── bin/                          # All executables
-│   ├── install.sh                # One-shot installer (slash + hook + launchd)
+│   ├── install.sh                # One-shot installer (slash + hook)
 │   ├── install-hook.sh           # Re-install only the hooks
 │   ├── uninstall.sh
 │   ├── mindmap                   # User-facing CLI dispatcher (bash)
@@ -106,7 +109,6 @@ claude-code-worktree/
 │   └── classify-cross-session.md # Layer 2 prompt (cross-session classifier)
 │
 ├── commands/                     # /mindmap and /mindmap-refresh templates
-├── launchd/                      # macOS LaunchAgent template
 │
 ├── cache/                        # Runtime state, gitignored
 │   ├── config.json               # {lang: zh-CN}
@@ -141,10 +143,8 @@ Who calls whom; who reads/writes what. **Solid = direct call**, **dashed = file-
 graph TD
     install["install.sh"] -.->|writes| set["~/.claude/settings.json"]
     install -.->|symlinks| sym["~/.local/bin/mindmap"]
-    install -.->|writes| la["~/Library/LaunchAgents/*.plist"]
 
     set -.->|"Stop / SessionStart"| bg["refresh-bg.sh"]
-    la -.->|"every 2h"| bg
     sym --> mm["mindmap"]
 
     mm --> render["render.py"]
@@ -283,7 +283,6 @@ report.
 ```mermaid
 flowchart TD
     H["Stop / SessionStart hook"] --> RB["refresh-bg.sh"]
-    LA["launchd every 2h"] --> RB
     UR["mindmap --refresh"] --> Pipe["pipeline-run.sh --all-dirty --force-classify"]
     API["POST /api/refresh"] --> Pipe
 
@@ -294,7 +293,7 @@ flowchart TD
     L1? -- no --> Skip["skip Layer 1"]
     L1? -- yes --> L1["run Layer 1"]
     L1 --> L2["fire Layer 2 (coalesced)"]
-    Pipe --> Bf["sweep all dirty"]
+    Pipe --> Bf["sweep all dirty (hot only)"]
     Bf --> L2
 
     style KS fill:#fcc,color:#000
@@ -302,14 +301,27 @@ flowchart TD
     style L2 fill:#fff3a0,color:#000
 ```
 
+Core pipeline:
+
 | Source | When | Behavior |
 |---|---|---|
-| Claude Code `Stop` hook | Each assistant turn end | `refresh-bg.sh --sid <sid>` — fork+detach, hook returns instantly |
-| Claude Code `SessionStart` hook | Session open / resume | Same |
-| macOS LaunchAgent | Every 2h | Same, but no SID — falls back to `--all-dirty` |
+| `Stop` / `SessionStart` hook | Each assistant turn end / session open | `refresh-bg.sh --sid <sid>` — fork+detach, hook returns instantly |
 | `mindmap --refresh` | User command | Forces a full sweep + classify, bypasses dirty gating on Layer 2 |
 | `POST /api/refresh` | UI 🔄 button | Same as above |
-| `cache/.refresh-disabled` | Manual touch | Kill switch — all hook fires exit immediately |
+| `cache/.refresh-disabled` | Manual touch / `mindmap --pause` | Kill switch — all hook fires exit immediately |
+
+Derived features (DD-006, scheduled by `serve.py` while dashboard is up):
+
+| Source | When | Behavior |
+|---|---|---|
+| serve scheduler — startup + every 6h | Tips for the header ticker (4 categories, AI-generated) |
+| serve scheduler — piggyback on tips | Wellness signal check (zero cost when no signal fires) |
+| serve scheduler — when mindmap.json mtime advances | Next-steps suggestions (30m internal debounce) |
+| serve scheduler — Friday 12:00 local | Weekly report (once per ISO week) |
+
+Earlier versions had a 2-hour launchd backup; that was removed once
+the hooks proved reliable and the lazy-refresh principle (DD-005) made
+"always run something in the background" an anti-feature.
 
 There is no global cooldown gate anymore (the old `last_ai_run.epoch`
 cooldown was a workaround for the single-pass architecture). Each
