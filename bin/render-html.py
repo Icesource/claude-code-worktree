@@ -2284,13 +2284,23 @@ footer.card-actions button.danger:hover { background: var(--red-bg); border-colo
       const r = await fetch(SERVER_ORIGIN + '/api/data');
       if (!r.ok) return;
       const j = await r.json();
+      // Lifecycle + cost-alarm change independently of mindmap content
+      // (e.g. user pauses but no new classify ran). Update those first
+      // every poll, regardless of the freshness check below.
+      if (j.lifecycle) {
+        const changed = JSON.stringify(j.lifecycle) !== JSON.stringify(LIFECYCLE);
+        if (changed) {
+          LIFECYCLE = j.lifecycle;
+          updateLifecycleBanner();
+        }
+      }
       const srvGen = j?.mindmap?.generated_at || '';
       if (!srvGen) return;
-      // Also detect changes in the archive directory (file count proxy)
+      // Detect mindmap or archive changes
       const newArcCount = (j.archived || []).length;
       const oldArcCount = (ARCHIVED_PERSISTED || []).length;
       if (srvGen === lastGeneratedAt && newArcCount === oldArcCount) {
-        return;  // nothing new
+        return;  // nothing new in the mindmap itself
       }
       // Apply: swap data + re-render in place.
       applyFreshData(j);
