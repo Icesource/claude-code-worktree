@@ -686,33 +686,44 @@ def save_task_archive(init_id: str, tasks: list[dict]) -> None:
 
 def aggregate_and_archive_tasks(new_mm: dict, prior: dict,
                                  hot_summaries: list) -> tuple[int, int]:
-    """Per DD-008 §3.3/§3.4: rebuild each hot initiative's tasks[].
+    """Per DD-009 §3.5: rebuild each hot initiative's tasks[] from
+    its CURRENT-ROUND evidence, with PRIOR consulted only for state
+    preservation. Replaces DD-008 v1's "carry forward all of PRIOR"
+    behavior, which let cross-initiative pollution persist forever
+    once a task got mis-assigned.
 
     For each hot initiative:
-      1. Load existing task archive.
-      2. Merge candidates from three sources (PRIOR, AI output, hot
-         summaries' frontmatter) by slugified-title id.
-      3. Done-monotone: any source with done=true wins forever.
-      4. Sort: not-done by first_seen_at desc, then done by done_at
-         desc.
-      5. Cap visible at MAX_VISIBLE_TASKS (always keep all not-done).
-      6. Persist the full ordered list to cache/task_archive/<id>.json.
-      7. Set `initiative.tasks` = visible slice and
-         `initiative.tasks_archived_count` = overflow count.
+      1. Canonical evidence this round = union of
+         (a) tasks in each session-in-init's summary frontmatter, AND
+         (b) AI-emitted tasks whose `id` matches an existing PRIOR
+             task in this initiative (AI's signal of "continuation",
+             allowing rewording without losing identity).
+      2. Dedup by id (slug of title, or AI-supplied id) inside that
+         set. Multiple sources for the same id merge — title from
+         latest wording, done OR'd, sessions[] union.
+      3. Preserve state from PRIOR for matching ids only:
+         first_seen_at, done state (monotone), done_at,
+         sessions union.
+      4. PRIOR tasks NOT in this canonical set are EVICTED to the
+         archive (eviction_reason=no_session_evidence,
+         evicted_at=now). Their state is preserved in the archive
+         file, the dashboard just stops showing them.
+      5. Visible cap at MAX_VISIBLE_TASKS — all not-done kept,
+         remainder filled with most-recent done; overflow goes to
+         archive too (overflow_capped reason).
+      6. Cold initiatives unchanged (§5 immutability), but legacy
+         tasks without `id` get a slug backfilled.
 
-    Cold initiatives are not touched here (§5 already keeps them
-    byte-identical; their archive files also stay untouched).
-
-    Returns (n_initiatives_processed, total_archived_count) for logging.
+    Returns (n_initiatives_processed, total_archived_count) for log.
     """
     now_iso = now_utc_iso()
 
-    # Map hot sid → tasks list parsed from frontmatter
+    # Map hot sid → list of {title, done} from that session's frontmatter
     hot_tasks_by_sid: dict[str, list[dict]] = {}
     for sid, _fm, _body, raw_fm in hot_summaries:
         hot_tasks_by_sid[sid] = parse_tasks_from_fm(raw_fm)
 
-    # PRIOR initiative lookup
+    # PRIOR initiative lookup, plus per-initiative {id → prior_task} index
     prior_by_id: dict[str, dict] = {}
     for w in (prior.get("workspaces") or []):
         for i in (w.get("initiatives") or []):
@@ -730,74 +741,128 @@ def aggregate_and_archive_tasks(new_mm: dict, prior: dict,
             hot_in_init = [s for s in sessions if s in hot_tasks_by_sid]
             if not hot_in_init:
                 # Cold — §5 says tasks/artifacts/blockers are byte-identical
-                # to PRIOR. We do NOT change content, but we DO enrich each
-                # task with a stable `id` if missing (legacy data migration).
-                # This is content-preserving: same title → same slug, no
-                # other fields touched, no archive write.
+                # to PRIOR. Don't touch content, but backfill `id` if a legacy
+                # task is missing one (no other change, no archive write).
                 for t in (init.get("tasks") or []):
                     if t.get("title") and not t.get("id"):
                         t["id"] = slugify_task_title(t["title"])
                 continue
             n_inits += 1
 
-            # Start the merged map from the existing archive
-            merged: dict[str, dict] = {}
-            for t in load_task_archive(init_id):
-                tid = t.get("id")
-                if tid:
-                    merged[tid] = dict(t)
+            prior_init = prior_by_id.get(init_id, {})
+            # Index PRIOR tasks by id (or generated slug for legacy data).
+            prior_tasks_by_id: dict[str, dict] = {}
+            for pt in (prior_init.get("tasks") or []):
+                if not pt.get("title"):
+                    continue
+                pid = pt.get("id") or slugify_task_title(pt["title"])
+                prior_tasks_by_id[pid] = dict(pt)
+                prior_tasks_by_id[pid]["id"] = pid  # normalize
 
-            # Build the candidate stream
+            # ===== Step 1: canonical-round candidates ============================
+            # 1a) hot summaries' tasks for each session in this initiative
             candidates: list[dict] = []
-            for t in (prior_by_id.get(init_id, {}).get("tasks") or []):
-                if t.get("title"):
-                    candidates.append({
-                        "title": t["title"],
-                        "done": bool(t.get("done")),
-                        "sid": None,
-                    })
-            for t in (init.get("tasks") or []):
-                if t.get("title"):
-                    candidates.append({
-                        "title": t["title"],
-                        "done": bool(t.get("done")),
-                        "sid": None,
-                    })
             for sid in hot_in_init:
                 for t in hot_tasks_by_sid.get(sid, []):
+                    if not t.get("title"):
+                        continue
                     candidates.append({
+                        "id": None,             # to be slugified
                         "title": t["title"],
                         "done": bool(t.get("done")),
-                        "sid": sid,
+                        "done_evidence": None,
+                        "source_sid": sid,
                     })
+            # 1b) AI-emitted tasks that explicitly reference a PRIOR id
+            # (continuation marker). Tasks with no `id` are NOT accepted
+            # here — they'd duplicate the hot-summary path. AI-emitted
+            # tasks with a brand-new `id` (no PRIOR match) are dropped —
+            # AI may NOT invent tasks not evidenced by any summary.
+            for t in (init.get("tasks") or []):
+                ai_id = t.get("id")
+                if not ai_id or ai_id not in prior_tasks_by_id:
+                    continue
+                if not t.get("title"):
+                    continue
+                candidates.append({
+                    "id": ai_id,
+                    "title": t["title"],
+                    "done": bool(t.get("done")),
+                    "done_evidence": (t.get("done_evidence") or "").strip()[:80] or None,
+                    "source_sid": None,         # AI continuation, no specific source
+                })
 
-            # Fold candidates into the merged map (slug = id)
+            # ===== Step 2: merge by id, capturing latest wording / monotone done
+            merged: dict[str, dict] = {}
             for c in candidates:
-                slug = slugify_task_title(c["title"])
-                cur = merged.get(slug)
+                tid = c["id"] or slugify_task_title(c["title"])
+                cur = merged.get(tid)
                 if cur is None:
-                    merged[slug] = {
-                        "id": slug,
+                    merged[tid] = {
+                        "id": tid,
                         "title": c["title"],
                         "done": c["done"],
-                        "first_seen_at": now_iso,
-                        "last_seen_at": now_iso,
-                        "done_at": now_iso if c["done"] else None,
-                        "sessions": [c["sid"]] if c["sid"] else [],
+                        "done_evidence": c["done_evidence"],
+                        "sessions": [c["source_sid"]] if c["source_sid"] else [],
+                        "_seen_this_round": True,
                     }
                 else:
-                    cur["title"] = c["title"]  # latest wording wins
-                    cur["last_seen_at"] = now_iso
-                    if c["done"] and not cur.get("done"):
+                    cur["title"] = c["title"]   # latest wording wins
+                    if c["done"]:
                         cur["done"] = True
-                        cur["done_at"] = now_iso
-                    if c["sid"]:
-                        sl = cur.setdefault("sessions", [])
-                        if c["sid"] not in sl:
-                            sl.append(c["sid"])
+                        # Prefer the longer / more explicit evidence
+                        if c["done_evidence"] and (
+                            not cur.get("done_evidence")
+                            or len(c["done_evidence"]) > len(cur["done_evidence"])
+                        ):
+                            cur["done_evidence"] = c["done_evidence"]
+                    if c["source_sid"] and c["source_sid"] not in cur["sessions"]:
+                        cur["sessions"].append(c["source_sid"])
 
+            # ===== Step 3: preserve state from PRIOR for matching ids ============
+            for tid, m in merged.items():
+                pt = prior_tasks_by_id.get(tid)
+                if not pt:
+                    # New task this round
+                    m["first_seen_at"] = now_iso
+                    m["last_seen_at"] = now_iso
+                    m["done_at"] = now_iso if m["done"] else None
+                    continue
+                m["first_seen_at"] = pt.get("first_seen_at") or now_iso
+                m["last_seen_at"] = now_iso
+                # Done-monotone: PRIOR done wins forever
+                if pt.get("done"):
+                    m["done"] = True
+                    m["done_at"] = pt.get("done_at") or now_iso
+                    # If PRIOR had evidence and this round didn't, keep PRIOR's
+                    if not m.get("done_evidence") and pt.get("done_evidence"):
+                        m["done_evidence"] = pt["done_evidence"]
+                elif m["done"]:
+                    # First time this task is marked done
+                    m["done_at"] = now_iso
+                # Merge sessions[] (PRIOR + this round)
+                for sid in (pt.get("sessions") or []):
+                    if sid not in m["sessions"]:
+                        m["sessions"].append(sid)
+
+            # ===== Step 4: evict PRIOR tasks with no canonical-round support ====
+            evicted: list[dict] = []
+            for tid, pt in prior_tasks_by_id.items():
+                if tid in merged:
+                    continue
+                ev = dict(pt)
+                ev.setdefault("first_seen_at", now_iso)
+                ev.setdefault("done_at", None)
+                ev["evicted_at"] = now_iso
+                ev["eviction_reason"] = "no_session_evidence"
+                evicted.append(ev)
+
+            # Strip the internal _seen_this_round marker before persisting
+            for m in merged.values():
+                m.pop("_seen_this_round", None)
+
+            # ===== Step 5: sort + cap visible ===================================
             all_tasks = list(merged.values())
-
             not_done = sorted(
                 [t for t in all_tasks if not t.get("done")],
                 key=lambda t: t.get("first_seen_at") or "",
@@ -810,22 +875,33 @@ def aggregate_and_archive_tasks(new_mm: dict, prior: dict,
             )
             ordered_all = not_done + done_tasks
 
-            # Cap: always keep all not-done; fill rest with most-recent done
+            # Always keep all not-done; fill remainder with most-recent done.
             remaining = max(0, MAX_VISIBLE_TASKS - len(not_done))
             visible = not_done + done_tasks[:remaining]
             if len(visible) > MAX_VISIBLE_TASKS:
                 visible = visible[:MAX_VISIBLE_TASKS]
 
-            archived_count = len(ordered_all) - len(visible)
-            total_archived += archived_count
+            overflow_capped = ordered_all[len(visible):]
+            for o in overflow_capped:
+                o["evicted_at"] = o.get("evicted_at") or now_iso
+                o["eviction_reason"] = o.get("eviction_reason") or "overflow_capped"
 
+            visible_archived = len(overflow_capped) + len(evicted)
+            total_archived += visible_archived
+
+            # ===== Step 6: write back ============================================
             init["tasks"] = [
-                {"id": t["id"], "title": t["title"], "done": t["done"]}
+                {
+                    **({"id": t["id"], "title": t["title"], "done": t["done"]}),
+                    **({"done_evidence": t["done_evidence"]} if t.get("done_evidence") else {}),
+                }
                 for t in visible
             ]
-            init["tasks_archived_count"] = archived_count
+            init["tasks_archived_count"] = visible_archived
 
-            save_task_archive(init_id, ordered_all)
+            # Archive payload: visible tasks (clean) + all archived/evicted
+            # (with eviction metadata). Keeps full history per DD-008 §3.5.
+            save_task_archive(init_id, ordered_all + evicted)
 
     return n_inits, total_archived
 

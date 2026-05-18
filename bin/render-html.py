@@ -1750,9 +1750,15 @@ footer.card-actions button.danger:hover { background: var(--red-bg); border-colo
     li.className = 'task' + (hidden ? ' hidden-done' : '');
     li.setAttribute('data-task-title', task.title);
     li.setAttribute('data-done', task.done ? 'true' : 'false');
+    // DD-009 done_evidence: AI-supplied short quote/paraphrase explaining
+    // why this task was flipped to done. Show as a discreet ✨ marker
+    // with the evidence as a native tooltip.
+    const evidenceHtml = (task.done && task.done_evidence)
+      ? ' <span class="task-evidence" title="' + esc(task.done_evidence) + '">✨</span>'
+      : '';
     li.innerHTML =
       '<input type="checkbox" ' + (task.done ? 'checked' : '') + '>' +
-      '<span class="task-title">' + esc(task.title) + '</span>' +
+      '<span class="task-title">' + esc(task.title) + '</span>' + evidenceHtml +
       '<button class="task-del" title="' + esc(I18N.btn_delete) + '">✕</button>';
 
     li.querySelector('input').addEventListener('change', (e) => {

@@ -42,7 +42,15 @@ output, with restricted modifications (see rule §5).**
           "status": "active | paused | done | archived",
           "summary": "<1-2 sentences: what this initiative is about>",
           "progress": "<1-2 sentences: current state>",
-          "tasks": [{"title": "<≤80 chars>", "done": true|false}],
+          "tasks": [
+            {
+              "id":  "<optional — REUSE PRIOR's id when continuing a task>",
+              "title": "<≤80 chars>",
+              "done": true | false,
+              "done_evidence": "<optional — required when flipping
+                               PRIOR.done false→true (see §7d), ≤80 chars>"
+            }
+          ],
           "sessions": ["<full UUID>", ...],
           "linked_cwds": [],
           "last_activity_at": "<max over its sessions>",
@@ -188,34 +196,81 @@ If empty, omit the `blockers` key.
 
 ## §7c — Aggregate tasks (hot initiatives only)
 
-For an initiative with at least one hot session, rebuild `tasks[]` as
-the union of:
+DD-009 changed the task ownership model. Tasks are now bound to the
+initiative's **current** sessions; PRIOR's tasks no longer
+auto-carry-forward — they survive only when re-supported by current
+evidence. This stops cross-initiative pollution at the source.
 
-- PRIOR initiative's `tasks[]` (all of it; carry forward)
-- Every hot session's `tasks:` frontmatter entries
+For each hot initiative, the `tasks[]` you emit must come from:
 
-Each task has the shape `{id, title, done}` plus internal-tracking
-fields (`first_seen_at`, `last_seen_at`, `done_at`) that classify.py
-manages — emit `{id, title, done}` and let the post-process handle the
-rest.
+1. **Hot session summaries' `tasks:` frontmatter** — each session in
+   this initiative's `sessions[]` has its own tasks block in its
+   summary. Those are the primary input.
+2. **PRIOR continuation** — when a PRIOR task is being described
+   anew (possibly with reworded title, possibly in a different
+   language), you may emit it WITH its PRIOR `id` field set. That's
+   how AI tells post-process "this is the same task, don't dedupe
+   into a separate slug." Without an `id`, post-process generates
+   one from `slugify(title)` — so reworded titles produce duplicates.
 
-- **Identity by `id`**, which is a slug of `title` (deterministic).
-  PRIOR tasks already have ids; for tasks coming straight from hot
-  summaries, emit just `{title, done}` — classify.py post-process
-  generates the slug.
-- **Reuse exact titles** when describing the same conceptual task
-  across rounds. The slug is `title`-derived; reworded titles produce
-  duplicates.
-- **`done` is monotone** (already enforced by §4): true wins forever.
-- **Cap to 20 visible tasks**. classify.py post-process performs the
-  final cap + archive write; you should still emit up to 20 yourself
-  (prefer not-done, then most-recently-done). Extra entries are not an
-  error — post-process trims them — but emitting tight output reduces
-  token waste.
-- **Don't invent tasks** that aren't in PRIOR or any hot summary.
+Hard rules:
+
+- **Reuse PRIOR's `id`** when a hot summary's task is semantically
+  the same as a PRIOR task. Reworded titles, translations
+  (中文 ↔ English), or expanded wordings all count as "same" if the
+  conceptual action is the same. The id field signals that
+  intent to post-process.
+- **Don't invent** tasks not present in any hot summary's tasks[]
+  AND not in PRIOR. (PRIOR-only tasks not re-evidenced get evicted
+  by post-process — that's intentional; see §3 of DD-009.)
+- **`done` is monotone** (§4): true wins forever. PRIOR done state
+  is preserved by post-process even if you forget to emit done=true.
+- **Cap to 20 visible tasks**. Post-process performs the final cap
+  + archive write; you may emit up to ~25 if you're listing
+  recently-done as well as pending.
 
 If neither PRIOR nor any hot summary has tasks for this initiative,
 omit the `tasks` key entirely (do NOT emit `[]`).
+
+## §7d — Mark PRIOR pending tasks done from hot summary evidence
+
+For each PRIOR `done: false` task in a hot initiative, examine the
+hot summaries' content (their `# 当前状态` / `# 已下的决定` /
+`# 产物` sections, plus their tasks[]) and decide whether that
+specific task has been completed since PRIOR was generated.
+
+A PRIOR task X is "completed" only when a hot summary clearly states
+the corresponding work shipped — MR merged, feature deployed, tests
+green, an explicit "X 完成 / done / shipped" phrasing that
+unambiguously refers to X (or a clear paraphrase). Lone words like
+"完成了" without referent don't count.
+
+If the evidence is clear, in your output:
+- Use PRIOR's `id` for the task (so post-process recognizes it as a
+  continuation, not a new task)
+- Set `done: true`
+- Add a `done_evidence` field: ≤80 chars, a brief paraphrase or
+  short quote from the summary explaining WHY you marked it done.
+  This becomes an audit trail visible in the UI tooltip.
+
+**If the evidence is ambiguous, DON'T flip.** done-monotone makes
+the flip irreversible from the user's normal flow. Over-eager
+completion leaves the user with checked tasks that aren't actually
+done, which they then have to manually un-check (which is also
+blocked by done-monotone). When in doubt, leave it pending; the
+user can check it manually.
+
+Example:
+- PRIOR: `{"id": "implement-online-offline-is-online-commands",
+           "title": "Implement online/offline/is-online commands",
+           "done": false}`
+- Hot summary's # 当前状态: "三个命令 (online/offline/is-online)
+  已实现完毕,MR 27411369 已合并。"
+- → Emit `{"id": "implement-online-offline-is-online-commands",
+            "title": "实现 online/offline/is-online 命令", "done": true,
+            "done_evidence": "MR 27411369 已合并,三个命令实现完毕"}`
+- (id reused, title rewritten to output_lang, done flipped,
+  evidence cited.)
 
 # Output language
 
@@ -249,7 +304,8 @@ work.
    sessions appear in HOT_SUMMARIES?).
    - Hot → you may update `progress`, refresh status from hot session
      signal, aggregate `artifacts[]` per §7a, `blockers[]` per §7b,
-     and `tasks[]` per §7c. Add new sessions if any.
+     and `tasks[]` per §7c. For each PRIOR pending task, apply §7d
+     (flip done=true only with clear evidence). Add new sessions if any.
    - Cold → apply §5 mechanically. Touch only `status` (decay rule).
      `artifacts[]` and `blockers[]` stay byte-identical.
 3. **Discover new initiatives** from HOT_SUMMARIES whose
@@ -274,8 +330,11 @@ For your output, verify each of:
 - [ ] All `artifacts[].url` values are non-empty strings (no nulls).
 - [ ] No duplicate `artifacts[]` entries (same URL) within one initiative.
 - [ ] `blockers[]` strings are short (≤ 80 chars each) and deduped.
-- [ ] `tasks[]` items came from PRIOR or a hot summary (no inventions);
-      no two entries share the same `id`; same `title` reused for the
-      same conceptual task across rounds.
+- [ ] `tasks[]` items came from a hot summary or are PRIOR continuations
+      with explicit `id` (no inventions); no two entries share the
+      same `id`. Reworded titles for the same conceptual task carry
+      PRIOR's `id`.
+- [ ] Every `done: true` flip from PRIOR's `done: false` has a
+      `done_evidence` field with a short quote/paraphrase.
 
 If any check fails, fix and retry. **Never emit broken output**.
