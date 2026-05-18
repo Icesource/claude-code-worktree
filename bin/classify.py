@@ -899,9 +899,25 @@ def aggregate_and_archive_tasks(new_mm: dict, prior: dict,
             ]
             init["tasks_archived_count"] = visible_archived
 
-            # Archive payload: visible tasks (clean) + all archived/evicted
-            # (with eviction metadata). Keeps full history per DD-008 §3.5.
-            save_task_archive(init_id, ordered_all + evicted)
+            # Archive is APPEND-ONLY history per DD-008 §3.5.
+            # CRITICAL: load the existing archive first, MERGE this round's
+            # state into it, then write back the union. Without this load,
+            # a round where this initiative has zero current tasks (e.g. a
+            # short cleanup session whose summary has an empty tasks block)
+            # would overwrite all previously-evicted tasks with [], losing
+            # historical data — this was the 2026-05-18 data-loss incident.
+            existing_archive: dict[str, dict] = {}
+            for t in load_task_archive(init_id):
+                tid = t.get("id")
+                if tid:
+                    existing_archive[tid] = dict(t)
+            # This round's records (visible + evicted) take precedence on id
+            # collision because they carry the latest title / done / evidence.
+            for t in ordered_all:
+                existing_archive[t["id"]] = t
+            for t in evicted:
+                existing_archive[t["id"]] = t
+            save_task_archive(init_id, list(existing_archive.values()))
 
     return n_inits, total_archived
 
